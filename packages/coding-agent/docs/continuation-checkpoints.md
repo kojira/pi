@@ -1,9 +1,5 @@
 # Continuation checkpoints
 
-## Status
-
-Implemented on `feature/tracked-task-continuation` as an opt-in built-in tool. The design intentionally leaves `agent_settled` semantics unchanged.
-
 ## Problem
 
 Pi ends an agent run when an assistant response has no tool calls and no queued steering or follow-up messages. This is correct for an ordinary final response, but models sometimes use the final assistant response for an intermediate progress report:
@@ -96,8 +92,10 @@ Forcing every response through complete/wait/progress tools can provide a strong
 
 Tests cover:
 
-- schema and neutral checkpoint result;
-- non-terminating behavior;
-- registration in the built-in tool catalog;
+- schema validation and the neutral checkpoint result;
+- a complete offline provider loop through the checkpoint to a final response;
+- tool-result persistence without a synthetic user message;
+- one final `agent_settled` event after continuation;
+- registration in the built-in tool catalog and public package entry point;
 - prompt metadata describing when to continue and when to stop;
 - preservation of the existing default active tool set.

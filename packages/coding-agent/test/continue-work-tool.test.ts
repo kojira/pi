@@ -1,7 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
-import { createContinueWorkTool, createContinueWorkToolDefinition } from "../src/core/tools/continue-work.ts";
 import { createAllToolDefinitions, createAllTools } from "../src/core/tools/index.ts";
+import {
+	type ContinueWorkToolCallEvent,
+	type ContinueWorkToolDetails,
+	type ContinueWorkToolInput,
+	type ContinueWorkToolResultEvent,
+	createContinueWorkTool,
+	createContinueWorkToolDefinition,
+	isContinueWorkToolResult,
+	isToolCallEventType,
+} from "../src/index.ts";
 
 describe("continue_work tool", () => {
 	it("records the model-authored next action without terminating the tool loop", async () => {
@@ -21,10 +30,36 @@ describe("continue_work tool", () => {
 		expect(result.terminate).toBeUndefined();
 	});
 
-	it("is available through the built-in definition and executable tool catalogs", () => {
+	it("is available through the public entry point and built-in catalogs", () => {
+		const input: ContinueWorkToolInput = { nextAction: "Run tests" };
+		const details: ContinueWorkToolDetails = input;
+
+		expectTypeOf(input.nextAction).toBeString();
+		expectTypeOf(details.nextAction).toBeString();
 		expect(createAllToolDefinitions("/workspace").continue_work.name).toBe("continue_work");
 		expect(createAllTools("/workspace").continue_work.name).toBe("continue_work");
 		expect(createContinueWorkTool().name).toBe("continue_work");
+	});
+
+	it("provides typed extension event narrowing through the public entry point", () => {
+		const call: ContinueWorkToolCallEvent = {
+			type: "tool_call",
+			toolCallId: "checkpoint-1",
+			toolName: "continue_work",
+			input: { nextAction: "Run tests" },
+		};
+		const result: ContinueWorkToolResultEvent = {
+			type: "tool_result",
+			toolCallId: "checkpoint-1",
+			toolName: "continue_work",
+			input: call.input,
+			content: [{ type: "text", text: "Continuation checkpoint recorded." }],
+			isError: false,
+			details: { nextAction: "Run tests" },
+		};
+
+		expect(isToolCallEventType("continue_work", call)).toBe(true);
+		expect(isContinueWorkToolResult(result)).toBe(true);
 	});
 
 	it("defines explicit continuation and stop conditions for the model", () => {

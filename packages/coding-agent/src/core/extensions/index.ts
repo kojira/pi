@@ -47,6 +47,8 @@ export type {
 	// Event Results
 	ContextEventResult,
 	ContextUsage,
+	ContinueWorkToolCallEvent,
+	ContinueWorkToolResultEvent,
 	CustomToolCallEvent,
 	CustomToolResultEvent,
 	EditorFactory,
@@ -181,6 +183,7 @@ export type {
 export {
 	defineTool,
 	isBashToolResult,
+	isContinueWorkToolResult,
 	isEditToolResult,
 	isFindToolResult,
 	isGrepToolResult,

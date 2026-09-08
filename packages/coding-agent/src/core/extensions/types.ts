@@ -71,6 +71,8 @@ import type { EditToolDetails } from "../tools/edit.ts";
 import type {
 	BashToolDetails,
 	BashToolInput,
+	ContinueWorkToolDetails,
+	ContinueWorkToolInput,
 	EditToolInput,
 	FindToolDetails,
 	FindToolInput,
@@ -931,6 +933,11 @@ export interface LsToolCallEvent extends ToolCallEventBase {
 	input: LsToolInput;
 }
 
+export interface ContinueWorkToolCallEvent extends ToolCallEventBase {
+	toolName: "continue_work";
+	input: ContinueWorkToolInput;
+}
+
 export interface CustomToolCallEvent extends ToolCallEventBase {
 	toolName: string;
 	input: Record<string, unknown>;
@@ -951,6 +958,7 @@ export type ToolCallEvent =
 	| GrepToolCallEvent
 	| FindToolCallEvent
 	| LsToolCallEvent
+	| ContinueWorkToolCallEvent
 	| CustomToolCallEvent;
 
 interface ToolResultEventBase {
@@ -1003,6 +1011,11 @@ export interface LsToolResultEvent extends ToolResultEventBase {
 	details: LsToolDetails | undefined;
 }
 
+export interface ContinueWorkToolResultEvent extends ToolResultEventBase {
+	toolName: "continue_work";
+	details: ContinueWorkToolDetails | undefined;
+}
+
 export interface CustomToolResultEvent extends ToolResultEventBase {
 	toolName: string;
 	details: unknown;
@@ -1018,6 +1031,7 @@ export type ToolResultEvent =
 	| GrepToolResultEvent
 	| FindToolResultEvent
 	| LsToolResultEvent
+	| ContinueWorkToolResultEvent
 	| CustomToolResultEvent;
 
 // Type guards for ToolResultEvent
@@ -1044,6 +1058,9 @@ export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
 }
 export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
 	return e.toolName === "ls";
+}
+export function isContinueWorkToolResult(e: ToolResultEvent): e is ContinueWorkToolResultEvent {
+	return e.toolName === "continue_work";
 }
 
 /**
@@ -1074,6 +1091,10 @@ export function isToolCallEventType(toolName: "write", event: ToolCallEvent): ev
 export function isToolCallEventType(toolName: "grep", event: ToolCallEvent): event is GrepToolCallEvent;
 export function isToolCallEventType(toolName: "find", event: ToolCallEvent): event is FindToolCallEvent;
 export function isToolCallEventType(toolName: "ls", event: ToolCallEvent): event is LsToolCallEvent;
+export function isToolCallEventType(
+	toolName: "continue_work",
+	event: ToolCallEvent,
+): event is ContinueWorkToolCallEvent;
 export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
 	toolName: TName,
 	event: ToolCallEvent,
