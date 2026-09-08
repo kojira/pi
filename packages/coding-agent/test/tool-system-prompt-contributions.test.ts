@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { bashToolSystemPromptContribution, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import {
+	continueWorkToolSystemPromptContribution,
+	createContinueWorkToolDefinition,
+} from "../src/core/tools/continue-work.ts";
 import { createEditToolDefinition, editToolSystemPromptContribution } from "../src/core/tools/edit.ts";
 import { createFindToolDefinition, findToolSystemPromptContribution } from "../src/core/tools/find.ts";
 import { createGrepToolDefinition, grepToolSystemPromptContribution } from "../src/core/tools/grep.ts";
@@ -20,6 +24,7 @@ const cases = [
 	["grep", grepToolSystemPromptContribution, createGrepToolDefinition],
 	["find", findToolSystemPromptContribution, createFindToolDefinition],
 	["ls", lsToolSystemPromptContribution, createLsToolDefinition],
+	["continue_work", continueWorkToolSystemPromptContribution, createContinueWorkToolDefinition],
 ] as const;
 
 describe("built-in tool system prompt contributions", () => {
