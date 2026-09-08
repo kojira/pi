@@ -19,6 +19,7 @@ import { time } from "./timings.ts";
 import {
 	createBashTool,
 	createCodingTools,
+	createContinueWorkTool,
 	createEditTool,
 	createFindTool,
 	createGrepTool,
@@ -119,6 +120,7 @@ export {
 	// Tool factories (for custom cwd)
 	createCodingTools,
 	createReadOnlyTools,
+	createContinueWorkTool,
 	createReadTool,
 	createBashTool,
 	createEditTool,
