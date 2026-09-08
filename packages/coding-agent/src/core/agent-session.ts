@@ -1874,12 +1874,17 @@ export class AgentSession {
 		this.agent.followUpMode = this.settingsManager.getFollowUpMode();
 	}
 
+	/** Set steering message mode for this session without modifying settings. */
+	setSessionSteeringMode(mode: "all" | "one-at-a-time"): void {
+		this.agent.steeringMode = mode;
+	}
+
 	/**
 	 * Set steering message mode.
 	 * Saves to settings.
 	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
-		this.agent.steeringMode = mode;
+		this.setSessionSteeringMode(mode);
 		this.settingsManager.setSteeringMode(mode);
 	}
 

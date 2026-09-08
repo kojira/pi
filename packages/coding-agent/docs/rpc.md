@@ -358,9 +358,24 @@ Response:
 
 ### Queue Modes
 
+#### set_session_steering_mode
+
+Control how steering messages (from `steer`) are delivered for the current process without changing `settings.json`.
+
+```json
+{"type": "set_session_steering_mode", "mode": "all"}
+```
+
+Modes are the same as `set_steering_mode`. Use this command when an RPC client needs an isolated queue policy that must not affect later interactive sessions.
+
+Response:
+```json
+{"type": "response", "command": "set_session_steering_mode", "success": true}
+```
+
 #### set_steering_mode
 
-Control how steering messages (from `steer`) are delivered.
+Control how steering messages (from `steer`) are delivered and persist the selected mode to global settings.
 
 ```json
 {"type": "set_steering_mode", "mode": "one-at-a-time"}

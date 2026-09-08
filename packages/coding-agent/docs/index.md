@@ -63,6 +63,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 - [SDK](sdk.md) - embed pi in Node.js applications.
 - [RPC mode](rpc.md) - integrate over stdin/stdout JSONL.
+- [Session-only RPC queue modes](rpc-session-queue-modes.md) - change an RPC process queue policy without modifying settings.
 - [Continuation checkpoints](continuation-checkpoints.md) - continue after intermediate progress without synthetic user input.
 - [JSON event stream mode](json.md) - print mode with structured events.
 - [TUI components](tui.md) - build custom terminal UI for extensions.

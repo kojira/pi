@@ -518,6 +518,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// Queue Modes
 			// =================================================================
 
+			case "set_session_steering_mode": {
+				session.setSessionSteeringMode(command.mode);
+				return success(id, "set_session_steering_mode");
+			}
+
 			case "set_steering_mode": {
 				session.setSteeringMode(command.mode);
 				return success(id, "set_steering_mode");

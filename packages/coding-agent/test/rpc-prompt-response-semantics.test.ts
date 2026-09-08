@@ -97,6 +97,8 @@ function sleep(ms: number): Promise<void> {
 
 async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
 	runtimeHost: AgentSessionRuntime;
+	session: AgentSession;
+	settingsManager: SettingsManager;
 	cleanup: () => Promise<void>;
 }> {
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -154,6 +156,8 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 
 	return {
 		runtimeHost,
+		session,
+		settingsManager,
 		cleanup: async () => {
 			try {
 				await session.abort();
@@ -170,22 +174,50 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 
 async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
 	lineHandler: (line: string) => void;
+	session: AgentSession;
+	settingsManager: SettingsManager;
 	cleanup: () => Promise<void>;
 }> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
 
-	const { runtimeHost, cleanup } = await createRuntimeHost(options);
+	const { runtimeHost, session, settingsManager, cleanup } = await createRuntimeHost(options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, session, settingsManager, cleanup };
 }
 
 describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+	});
+
+	it("sets steering mode for only the active RPC session", async () => {
+		const { lineHandler, session, settingsManager, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+		});
+		const persistSpy = vi.spyOn(settingsManager, "setSteeringMode");
+
+		try {
+			expect(session.steeringMode).toBe("one-at-a-time");
+			lineHandler(JSON.stringify({ id: "mode-1", type: "set_session_steering_mode", mode: "all" }));
+
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+					id: "mode-1",
+					type: "response",
+					command: "set_session_steering_mode",
+					success: true,
+				});
+			});
+			expect(session.steeringMode).toBe("all");
+			expect(persistSpy).not.toHaveBeenCalled();
+		} finally {
+			await cleanup();
+		}
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {

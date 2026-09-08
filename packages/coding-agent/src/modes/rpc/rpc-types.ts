@@ -40,6 +40,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_available_thinking_levels" }
 
 	// Queue modes
+	| { id?: string; type: "set_session_steering_mode"; mode: "all" | "one-at-a-time" }
 	| { id?: string; type: "set_steering_mode"; mode: "all" | "one-at-a-time" }
 	| { id?: string; type: "set_follow_up_mode"; mode: "all" | "one-at-a-time" }
 
@@ -172,6 +173,7 @@ export type RpcResponse =
 	  }
 
 	// Queue modes
+	| { id?: string; type: "response"; command: "set_session_steering_mode"; success: true }
 	| { id?: string; type: "response"; command: "set_steering_mode"; success: true }
 	| { id?: string; type: "response"; command: "set_follow_up_mode"; success: true }
 
