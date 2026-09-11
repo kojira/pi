@@ -105,6 +105,48 @@ describe("explicit work completion", () => {
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
+	it("preserves a finish summary across context-only messages, but not a later assistant response", async () => {
+		const harness = await createHarness({ explicitWorkCompletion: true });
+		harnesses.push(harness);
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "toolResult" &&
+				event.message.toolName === "finish_work"
+			) {
+				void harness.session.sendCustomMessage(
+					{ customType: "test-context", content: "Auxiliary context", display: false },
+					{ triggerTurn: false },
+				);
+			}
+		});
+		harness.setResponses([checkpoint(), finish()]);
+		await harness.session.prompt("Verify");
+		expect(harness.session.messages.at(-1)?.role).toBe("custom");
+		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
+		harness.setResponses([fauxAssistantMessage("Answer to new input")]);
+		await harness.session.prompt("A new question");
+		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");
+	});
+
+	it("processes follow-up input queued after a successful finish", async () => {
+		const harness = await createHarness({ explicitWorkCompletion: true });
+		harnesses.push(harness);
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "toolResult" &&
+				event.message.toolName === "finish_work"
+			) {
+				void harness.session.followUp("A new question");
+			}
+		});
+		harness.setResponses([checkpoint(), finish(), fauxAssistantMessage("Answer to new input")]);
+		await harness.session.prompt("Verify");
+		expect(getUserTexts(harness)).toEqual(["Verify", "A new question"]);
+		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");
+	});
+
 	it("suspends an aborted checkpoint without replaying it", async () => {
 		const harness = await createHarness({ explicitWorkCompletion: true });
 		harnesses.push(harness);

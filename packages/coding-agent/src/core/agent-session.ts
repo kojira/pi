@@ -3551,15 +3551,28 @@ export class AgentSession {
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
 	getLastAssistantText(): string | undefined {
-		const lastMessage = this.messages[this.messages.length - 1];
+		let lastAssistantIndex = this.messages.length - 1;
+		while (lastAssistantIndex >= 0 && this.messages[lastAssistantIndex].role !== "assistant") lastAssistantIndex--;
+		const lastAssistantMessage = this.messages[lastAssistantIndex];
 		const contract = this.workContract;
-		if (
-			lastMessage?.role === "toolResult" &&
-			lastMessage.toolName === "finish_work" &&
-			!lastMessage.isError &&
-			contract?.status === "resolved"
-		) {
-			return contract.decision.summary;
+		if (contract?.status === "resolved" && lastAssistantMessage?.role === "assistant") {
+			// Context-only messages may follow a finish result without starting a new response.
+			const successfulFinish = lastAssistantMessage.content.some(
+				(call) =>
+					call.type === "toolCall" &&
+					call.name === "finish_work" &&
+					call.arguments.checkpointId === contract.checkpointId &&
+					this.messages
+						.slice(lastAssistantIndex + 1)
+						.some(
+							(message) =>
+								message.role === "toolResult" &&
+								message.toolName === "finish_work" &&
+								message.toolCallId === call.id &&
+								!message.isError,
+						),
+			);
+			if (successfulFinish) return contract.decision.summary;
 		}
 		const lastAssistant = this.messages
 			.slice()

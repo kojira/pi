@@ -93,7 +93,7 @@ afterEach(() => {
 });
 
 describe("runPrintMode", () => {
-	it("prints the explicit finish summary rather than the prior progress message", async () => {
+	it.each(["finish", "follow-up", "follow-up error"])("prints the latest result after %s", async (scenario) => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still working" }));
 		let listener: ((event: AgentSessionEvent) => void) | undefined;
 		runtimeHost.session.subscribe.mockImplementation((callback) => {
@@ -115,15 +115,33 @@ describe("runPrintMode", () => {
 					},
 				},
 			});
+			if (scenario !== "finish") {
+				const message = createAssistantMessage({
+					text: "Answer to new input",
+					stopReason: scenario === "follow-up error" ? "error" : "stop",
+					errorMessage: scenario === "follow-up error" ? "follow-up failed" : undefined,
+				});
+				listener?.({ type: "message_start", message });
+				listener?.({ type: "message_end", message });
+				runtimeHost.session.state.messages = [message];
+			}
 		});
 		const write = vi.spyOn(outputGuard, "writeRawStdout").mockImplementation(() => {});
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 		expect(
 			await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
 				mode: "text",
 				initialMessage: "Verify",
 			}),
-		).toBe(0);
-		expect(write).toHaveBeenCalledExactlyOnceWith("Done; not deployed\n");
+		).toBe(scenario === "follow-up error" ? 1 : 0);
+		if (scenario === "follow-up error") {
+			expect(error).toHaveBeenCalledWith("follow-up failed");
+			expect(write).not.toHaveBeenCalled();
+		} else {
+			expect(write).toHaveBeenCalledExactlyOnceWith(
+				scenario === "finish" ? "Done; not deployed\n" : "Answer to new input\n",
+			);
+		}
 	});
 
 	it("emits session_shutdown in text mode", async () => {

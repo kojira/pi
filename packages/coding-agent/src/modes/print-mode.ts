@@ -74,6 +74,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	});
 
 	const rebindSession = async (): Promise<void> => {
+		terminalWorkRecord = undefined;
 		session = runtimeHost.session;
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
@@ -110,6 +111,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe = session.subscribe((event) => {
 			if (event.type === "work_contract") {
 				terminalWorkRecord = event.record.status === "active" ? undefined : event.record;
+			} else if (event.type === "message_start" && event.message.role === "assistant") {
+				// Follow-up input can start another response after finish_work succeeds.
+				terminalWorkRecord = undefined;
 			}
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
