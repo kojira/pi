@@ -9,6 +9,7 @@
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
+import type { WorkContractRecord } from "../core/work-contract.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { toJsonEvent } from "./json-event.ts";
 
@@ -33,6 +34,7 @@ export interface PrintModeOptions {
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages } = options;
 	let exitCode = 0;
+	let terminalWorkRecord: WorkContractRecord | undefined;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
@@ -106,6 +108,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
+			if (event.type === "work_contract") {
+				terminalWorkRecord = event.record.status === "active" ? undefined : event.record;
+			}
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
 			}
@@ -133,10 +138,16 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		for (const message of messages) {
+			terminalWorkRecord = undefined;
 			await session.prompt(message);
 		}
 
-		if (mode === "text") {
+		if (mode === "text" && terminalWorkRecord?.status === "resolved") {
+			writeRawStdout(`${terminalWorkRecord.decision.summary}\n`);
+		} else if (mode === "text" && terminalWorkRecord?.status === "suspended") {
+			console.error(terminalWorkRecord.reason);
+			exitCode = 1;
+		} else if (mode === "text") {
 			const state = session.state;
 			const lastMessage = state.messages[state.messages.length - 1];
 

@@ -61,6 +61,8 @@ export function getAssistantTexts(harness: Harness): string[] {
 }
 
 export interface HarnessOptions {
+	/** Simulate Codex request payloads using faux responses; never calls a real endpoint. */
+	explicitWorkCompletion?: boolean;
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
@@ -142,9 +144,15 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 
 	const agent = new Agent({
 		getApiKey: () => (withConfiguredAuth ? "faux-key" : undefined),
-		streamFn: streamSimple,
+		streamFn: options.explicitWorkCompletion
+			? async (requestModel, context, requestOptions) => {
+					// Faux does not construct wire payloads. Exercise the Codex payload boundary explicitly.
+					await requestOptions?.onPayload?.({ tool_choice: "auto" }, requestModel);
+					return streamSimple(model, context, { ...requestOptions, onPayload: undefined });
+				}
+			: streamSimple,
 		initialState: {
-			model,
+			model: options.explicitWorkCompletion ? { ...model, api: "openai-codex-responses" } : model,
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
 			tools: [],
 		},
@@ -180,6 +188,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
 
 	const session = new AgentSession({
+		explicitWorkCompletion: options.explicitWorkCompletion,
 		agent,
 		sessionManager,
 		settingsManager,

@@ -202,6 +202,12 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	private _inputVersion = 0;
+
+	/** Monotonic acceptance version, including messages not yet delivered to the model. */
+	get inputVersion(): number {
+		return this._inputVersion;
+	}
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -281,11 +287,13 @@ export class Agent {
 
 	/** Queue a message to be injected after the current assistant turn finishes. */
 	steer(message: AgentMessage): void {
+		this._inputVersion++;
 		this.steeringQueue.enqueue(message);
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
 	followUp(message: AgentMessage): void {
+		this._inputVersion++;
 		this.followUpQueue.enqueue(message);
 	}
 
@@ -354,6 +362,7 @@ export class Agent {
 			);
 		}
 		const messages = this.normalizePromptInput(input, images);
+		this._inputVersion++;
 		await this.runPromptMessages(messages);
 	}
 

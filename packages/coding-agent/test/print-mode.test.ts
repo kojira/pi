@@ -1,5 +1,7 @@
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import * as outputGuard from "../src/core/output-guard.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
 
@@ -91,6 +93,39 @@ afterEach(() => {
 });
 
 describe("runPrintMode", () => {
+	it("prints the explicit finish summary rather than the prior progress message", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still working" }));
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		runtimeHost.session.subscribe.mockImplementation((callback) => {
+			listener = callback;
+			return () => {};
+		});
+		runtimeHost.session.prompt.mockImplementation(async () => {
+			listener?.({
+				type: "work_contract",
+				record: {
+					status: "resolved",
+					checkpointId: "checkpoint-1",
+					nextAction: "Verify",
+					decision: {
+						checkpointId: "checkpoint-1",
+						outcome: "completed",
+						reason: "Verified",
+						summary: "Done; not deployed",
+					},
+				},
+			});
+		});
+		const write = vi.spyOn(outputGuard, "writeRawStdout").mockImplementation(() => {});
+		expect(
+			await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				initialMessage: "Verify",
+			}),
+		).toBe(0);
+		expect(write).toHaveBeenCalledExactlyOnceWith("Done; not deployed\n");
+	});
+
 	it("emits session_shutdown in text mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;
