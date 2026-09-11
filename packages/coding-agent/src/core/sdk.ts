@@ -38,6 +38,8 @@ import {
 setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
+	/** Require explicit finish_work decisions after continue_work. Currently supports Codex Responses. */
+	explicitWorkCompletion?: boolean;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -388,6 +390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const session = new AgentSession({
+		explicitWorkCompletion: options.explicitWorkCompletion,
 		agent,
 		sessionManager,
 		settingsManager,

@@ -1,4 +1,4 @@
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentContext, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	type Context,
@@ -476,6 +476,115 @@ describe("AgentSession compaction characterization", () => {
 		expect(resumedRequest).toContain("compacted history");
 		expect(resumedRequest).toContain("large-tool-result");
 		expect(harness.session.getLastAssistantText()).toBe("finished after compaction");
+	});
+
+	it.each([
+		{
+			name: "recovers when a low-level run returns after in-loop compaction before the next assistant starts",
+			abortAfterCompaction: false,
+			expectedProviderRequests: 2,
+		},
+		{
+			name: "does not recover when the low-level run is aborted after in-loop compaction",
+			abortAfterCompaction: true,
+			expectedProviderRequests: 1,
+		},
+	])("$name", async ({ abortAfterCompaction, expectedProviderRequests }) => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+			settings: { compaction: { enabled: true, reserveTokens: 400, keepRecentTokens: 1750 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "compacted before the missing response",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const model = harness.getModel();
+		const now = Date.now();
+		const toolCall = fauxToolCall("read", { path: `large-argument:${"x".repeat(12_000)}` });
+		const toolAssistant = createAssistant(harness, { stopReason: "toolUse", timestamp: now - 100 });
+		toolAssistant.content = [toolCall];
+		const toolResult = {
+			role: "toolResult" as const,
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text" as const, text: "tool completed once" }],
+			details: {},
+			isError: false,
+			timestamp: now,
+		};
+		for (const message of [
+			{ role: "user" as const, content: [{ type: "text" as const, text: "old history" }], timestamp: now - 400 },
+			{
+				...fauxAssistantMessage(`old answer:${"a".repeat(800)}`, { timestamp: now - 300 }),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+			},
+			{ role: "user" as const, content: [{ type: "text" as const, text: "run the tool" }], timestamp: now - 200 },
+			toolAssistant,
+			toolResult,
+		]) {
+			harness.sessionManager.appendMessage(message);
+		}
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+
+		const internals = harness.session as unknown as {
+			_compactBeforeNextAssistantResponse: (context: AgentContext, signal?: AbortSignal) => Promise<AgentContext>;
+			_lastAssistantMessage: AssistantMessage | undefined;
+			_pendingInLoopCompactionContinuation: boolean;
+			_runAgentPrompt: (messages: AgentMessage | AgentMessage[]) => Promise<void>;
+		};
+		let providerRequests = 0;
+		const runAbortController = new AbortController();
+		vi.spyOn(harness.session.agent, "abort").mockImplementation(() => runAbortController.abort());
+		vi.spyOn(harness.session.agent, "prompt").mockImplementation(async () => {
+			providerRequests++;
+			internals._lastAssistantMessage = toolAssistant;
+			await internals._compactBeforeNextAssistantResponse(
+				{
+					systemPrompt: harness.session.agent.state.systemPrompt,
+					messages: harness.session.agent.state.messages.slice(),
+					tools: harness.session.agent.state.tools.slice(),
+				},
+				runAbortController.signal,
+			);
+			expect(internals._pendingInLoopCompactionContinuation).toBe(true);
+			if (abortAfterCompaction) harness.session.agent.abort();
+		});
+		vi.spyOn(harness.session.agent, "continue").mockImplementation(async () => {
+			providerRequests++;
+			internals._lastAssistantMessage = createAssistant(harness, { stopReason: "stop", totalTokens: 1 });
+		});
+		const settledBefore = harness.eventsOfType("agent_settled").length;
+
+		await internals._runAgentPrompt({
+			role: "user",
+			content: [{ type: "text", text: "start simulated run" }],
+			timestamp: now + 1,
+		});
+
+		expect(providerRequests).toBe(expectedProviderRequests);
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(settledBefore + 1);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === toolCall.id,
+				),
+		).toHaveLength(1);
 	});
 
 	it("includes steering queued during compaction in the resumed assistant request", async () => {

@@ -1,5 +1,21 @@
 # Continuation checkpoints
 
+This page distinguishes the portable checkpoint-only tool from the opt-in explicit-completion mode below.
+
+## Explicit-completion mode
+
+Enable with `--explicit-work-completion` or SDK `explicitWorkCompletion: true`. Only the `openai-codex-responses` API is currently accepted. When using a tool allowlist, include both `continue_work` and `finish_work`; exclusions are not bypassed.
+
+A successful `continue_work` creates a persisted active contract and returns its checkpoint ID. Active requests enforce `tool_choice: "required"` after request extensions have run. Ordinary work tools and user comments do not clear the contract. To resolve it, the model calls `finish_work` alone with `checkpointId`, `outcome` (`completed`, `cancelled`, `waiting`, or `blocked`), `reason`, and `summary`.
+
+Mixed finish batches are rejected before any tool in the batch executes. Input accepted after the request began invalidates its finish decision. A stale finish ends only that tool batch, allowing the existing loop to consume queued follow-up input and reconsider the decision; it does not resolve the contract or inject a user message.
+
+A text-only provider response during active work is a protocol error and suspends the contract. Abort, disposal, and settlement without a finish decision do not mean completion. Active persisted records restore as suspended and are never automatically executed. Contract records survive transcript compaction.
+
+SDK/RPC consumers receive `work_contract` events and can inspect `session.workContract`. A resolved event carries the model's final summary, without another provider request. `agent_settled` still means physical idle. Print mode outputs the resolution summary or a suspension error. The gateway uses the resolution summary as the final response.
+
+The remaining sections describe checkpoint-only mode, which remains unchanged unless explicit-completion mode is enabled.
+
 ## Problem
 
 Pi ends an agent run when an assistant response has no tool calls and no queued steering or follow-up messages. This is correct for an ordinary final response, but models sometimes use the final assistant response for an intermediate progress report:
@@ -57,6 +73,14 @@ Example project setting:
 }
 ```
 
+## Recovery after in-loop compaction
+
+A non-terminating tool result normally causes the low-level loop to prepare and request the next assistant response. Automatic threshold compaction can run during that preparation. If the low-level run then returns without starting the expected assistant response, the compacted session is left at a valid tool-result boundary but would otherwise settle.
+
+`AgentSession` records a pending continuation only when threshold compaction succeeds inside this pre-response preparation path. Starting any assistant response clears the marker. If the low-level run ends while the marker remains, the existing post-run loop calls `Agent.continue()` once.
+
+This recovery is based on lifecycle events, not prose. Explicitly terminating tool batches and host `shouldStopAfterTurn` decisions never enter pre-response preparation, so they do not create the marker. The marker retains the low-level run signal, so direct agent aborts as well as session abort and disposal prevent recovery. The recovery adds no message, does not replay the completed tool, and delays `agent_settled` until the resumed run physically becomes idle.
+
 ## Safety and failure behavior
 
 - The tool has no external side effects.
@@ -84,9 +108,9 @@ Phrase matching is language-dependent and confuses plans, quotations, explanatio
 
 RPC waiters and shutdown logic rely on settlement as physical session idleness. Logical task completion is a different concept.
 
-### Mandatory task-state tools
+### Mandatory task-state tools for all sessions
 
-Forcing every response through complete/wait/progress tools can provide a stronger tracked-task contract, but requires provider-neutral required-tool-choice support, terminal-state persistence, budgets, and a suspension lifecycle. This checkpoint tool is the minimal provider-portable mechanism for the reported failure mode.
+Explicit-completion mode provides a stronger contract for supported APIs, but remains opt-in. The checkpoint-only tool remains the provider-portable alternative; it does not guarantee explicit termination.
 
 ## Validation
 

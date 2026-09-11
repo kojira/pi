@@ -32,6 +32,7 @@ export interface Args {
 	tools?: string[];
 	excludeTools?: string[];
 	noTools?: boolean;
+	explicitWorkCompletion?: boolean;
 	noBuiltinTools?: boolean;
 	extensions?: string[];
 	noExtensions?: boolean;
@@ -130,6 +131,8 @@ export function parseArgs(args: string[]): Args {
 			result.sessionDir = args[++i];
 		} else if (arg === "--models" && i + 1 < args.length) {
 			result.models = args[++i].split(",").map((s) => s.trim());
+		} else if (arg === "--explicit-work-completion") {
+			result.explicitWorkCompletion = true;
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
@@ -292,6 +295,7 @@ ${chalk.bold("Options:")}
   --name, -n <name>              Set session display name
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
+  --explicit-work-completion     Require finish_work after continue_work (Codex Responses only)
   --no-tools, -nt                Disable all tools by default (built-in and extension)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
   --tools, -t <tools>            Comma-separated allowlist of tool names to enable

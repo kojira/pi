@@ -112,6 +112,8 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
+import type { WorkContractRecord } from "./work-contract.ts";
+import { WorkContractRuntime } from "./work-contract-runtime.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -149,6 +151,7 @@ export type AgentSessionEvent =
 			willRetry: boolean;
 	  }
 	| { type: "agent_settled" }
+	| { type: "work_contract"; record: WorkContractRecord }
 	| {
 			type: "queue_update";
 			steering: readonly string[];
@@ -198,6 +201,8 @@ function withoutDeletedHeaders(headers: ProviderHeaders | undefined): Record<str
 }
 
 export interface AgentSessionConfig {
+	/** Opt in to persisted work contracts and required explicit finish decisions. Codex Responses only. */
+	explicitWorkCompletion?: boolean;
 	agent: Agent;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
@@ -333,6 +338,10 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _autoCompactionGeneration = 0;
+	private _continuationCancellationGeneration = 0;
+	private _pendingInLoopCompactionContinuation = false;
+	private _pendingInLoopCompactionSignal: AbortSignal | undefined;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -369,6 +378,11 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
+	private _workContractRuntime?: WorkContractRuntime;
+
+	get workContract(): WorkContractRecord | undefined {
+		return this._workContractRuntime?.contract.state;
+	}
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -387,7 +401,7 @@ export class AgentSession {
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
-		this._customTools = config.customTools ?? [];
+		this._customTools = [...(config.customTools ?? [])];
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
 		this._extensionRunnerRef = config.extensionRunnerRef;
@@ -396,6 +410,18 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+
+		if (config.explicitWorkCompletion) {
+			for (const name of ["continue_work", "finish_work"]) {
+				if ((this._allowedToolNames && !this._allowedToolNames.has(name)) || this._excludedToolNames?.has(name)) {
+					throw new Error(`Explicit work completion requires ${name} to be allowed`);
+				}
+			}
+			this._workContractRuntime = new WorkContractRuntime(this.agent, this.sessionManager, (record) => {
+				this._emit({ type: "work_contract", record });
+			});
+			this._customTools.push(...this._workContractRuntime.tools);
+		}
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -484,7 +510,10 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+		this.agent.beforeToolCall = async (context) => {
+			const blocked = this._workContractRuntime?.beforeToolCall(context);
+			if (blocked) return blocked;
+			const { toolCall, args } = context;
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
@@ -539,7 +568,10 @@ export class AgentSession {
 		};
 	}
 
-	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
+	private async _compactBeforeNextAssistantResponse(
+		context: AgentContext,
+		runSignal?: AbortSignal,
+	): Promise<AgentContext> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings();
 
@@ -551,7 +583,19 @@ export class AgentSession {
 			return context;
 		}
 
+		const compactionGeneration = this._autoCompactionGeneration;
+		const cancellationGeneration = this._continuationCancellationGeneration;
+		const toolResultBoundary = context.messages.at(-1)?.role === "toolResult";
 		await this._runAutoCompaction("threshold", false);
+		if (
+			toolResultBoundary &&
+			this._autoCompactionGeneration > compactionGeneration &&
+			this._continuationCancellationGeneration === cancellationGeneration &&
+			runSignal?.aborted !== true
+		) {
+			this._pendingInLoopCompactionContinuation = true;
+			this._pendingInLoopCompactionSignal = runSignal;
+		}
 		return {
 			...context,
 			messages: this.agent.state.messages.slice(),
@@ -565,7 +609,7 @@ export class AgentSession {
 				? async (_turn: PrepareNextTurnContext, signal?: AbortSignal) => await this.agent.prepareNextTurn?.(signal)
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-			const context = await this._compactBeforeNextAssistantResponse(turn.context);
+			const context = await this._compactBeforeNextAssistantResponse(turn.context, signal);
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.({ ...turn, context }, signal);
 			const nextContext = previousSnapshot?.context ?? context;
 
@@ -629,8 +673,12 @@ export class AgentSession {
 	private async _emitAgentSettled(): Promise<void> {
 		this._isAgentRunActive = false;
 		try {
-			await this._extensionRunner.emit({ type: "agent_settled" });
-			this._emit({ type: "agent_settled" });
+			try {
+				this._workContractRuntime?.contract.suspend("Agent settled without an explicit finish decision");
+			} finally {
+				await this._extensionRunner.emit({ type: "agent_settled" });
+				this._emit({ type: "agent_settled" });
+			}
 		} finally {
 			this._resolveIdleWaitIfIdle();
 		}
@@ -641,6 +689,11 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "message_start" && event.message.role === "assistant") {
+			this._pendingInLoopCompactionContinuation = false;
+			this._pendingInLoopCompactionSignal = undefined;
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -665,6 +718,8 @@ export class AgentSession {
 
 		// Emit to extensions first
 		await this._emitExtensionEvent(event);
+
+		this._workContractRuntime?.onEvent(event);
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -879,12 +934,16 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._continuationCancellationGeneration++;
+		this._pendingInLoopCompactionContinuation = false;
+		this._pendingInLoopCompactionSignal = undefined;
 		try {
 			this.abortRetry();
 			this.abortCompaction();
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			this._workContractRuntime?.contract.suspend("Session disposed");
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -1104,6 +1163,8 @@ export class AgentSession {
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._isAgentRunActive = true;
+		this._pendingInLoopCompactionContinuation = false;
+		this._pendingInLoopCompactionSignal = undefined;
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
@@ -1113,15 +1174,21 @@ export class AgentSession {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
+			this._pendingInLoopCompactionContinuation = false;
+			this._pendingInLoopCompactionSignal = undefined;
 			await this._emitAgentSettled();
 		}
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
+		const resumeAfterInLoopCompaction =
+			this._pendingInLoopCompactionContinuation && this._pendingInLoopCompactionSignal?.aborted !== true;
+		this._pendingInLoopCompactionContinuation = false;
+		this._pendingInLoopCompactionSignal = undefined;
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
-			return false;
+			return resumeAfterInLoopCompaction;
 		}
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
@@ -1144,7 +1211,9 @@ export class AgentSession {
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
-		return this.agent.hasQueuedMessages();
+		// If in-loop compaction completed but no following assistant response started,
+		// resume once from the preserved tool-result boundary.
+		return resumeAfterInLoopCompaction || this.agent.hasQueuedMessages();
 	}
 
 	/**
@@ -1617,6 +1686,9 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		this._continuationCancellationGeneration++;
+		this._pendingInLoopCompactionContinuation = false;
+		this._pendingInLoopCompactionSignal = undefined;
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
@@ -2354,6 +2426,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			this._autoCompactionGeneration++;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
@@ -3286,6 +3359,8 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
+			this._workContractRuntime?.restoreBranch();
+
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
@@ -3476,6 +3551,29 @@ export class AgentSession {
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
 	getLastAssistantText(): string | undefined {
+		let lastAssistantIndex = this.messages.length - 1;
+		while (lastAssistantIndex >= 0 && this.messages[lastAssistantIndex].role !== "assistant") lastAssistantIndex--;
+		const lastAssistantMessage = this.messages[lastAssistantIndex];
+		const contract = this.workContract;
+		if (contract?.status === "resolved" && lastAssistantMessage?.role === "assistant") {
+			// Context-only messages may follow a finish result without starting a new response.
+			const successfulFinish = lastAssistantMessage.content.some(
+				(call) =>
+					call.type === "toolCall" &&
+					call.name === "finish_work" &&
+					call.arguments.checkpointId === contract.checkpointId &&
+					this.messages
+						.slice(lastAssistantIndex + 1)
+						.some(
+							(message) =>
+								message.role === "toolResult" &&
+								message.toolName === "finish_work" &&
+								message.toolCallId === call.id &&
+								!message.isError,
+						),
+			);
+			if (successfulFinish) return contract.decision.summary;
+		}
 		const lastAssistant = this.messages
 			.slice()
 			.reverse()
