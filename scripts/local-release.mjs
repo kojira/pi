@@ -28,7 +28,7 @@ isolated directory outside the repository for local release testing.
 Options:
   --out <dir>          Output directory. Defaults to a new directory under ${tmpdir()}
   --force              Remove --out first if it already exists
-  --skip-check         Do not run npm run check before building
+  --skip-check         Do not run pnpm run check before building
   --skip-test          Do not run ./test.sh before building
   --skip-install       Only create tarballs; do not create isolated installs
   --skip-bun-install   Do not create the isolated Bun install
@@ -198,15 +198,15 @@ mkdirSync(tarballDirectory, { recursive: true });
 
 // Release artifacts always use a freshly generated, strictly validated catalog,
 // including when checks or tests are explicitly skipped.
-run("npm", ["run", "generate:models"], { cwd: repoRoot });
+run("pnpm", ["run", "generate:models"], { cwd: repoRoot });
 
 if (!options.skipCheck) {
-	run("npm", ["run", "check"], { cwd: repoRoot });
+	run("pnpm", ["run", "check"], { cwd: repoRoot });
 }
 
 for (const pkg of packages) {
-	run("npm", ["run", "clean"], { cwd: pkg.directory });
-	run("npm", ["run", pkg.directory === "packages/ai" ? "build:offline" : "build"], { cwd: pkg.directory });
+	run("pnpm", ["run", "clean"], { cwd: pkg.directory });
+	run("pnpm", ["run", pkg.directory === "packages/ai" ? "build:offline" : "build"], { cwd: pkg.directory });
 }
 
 if (!options.skipTest) {

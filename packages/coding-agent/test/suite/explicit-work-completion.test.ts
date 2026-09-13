@@ -23,6 +23,29 @@ const finish = () =>
 		{ stopReason: "toolUse" },
 	);
 
+function assistantTexts(harness: Harness): string[] {
+	return harness.session.messages
+		.filter((message) => message.role === "assistant")
+		.map((message) =>
+			message.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("\n"),
+		);
+}
+
+function sessionAssistantTexts(harness: Harness): string[] {
+	return harness.sessionManager
+		.getEntries()
+		.flatMap((entry) => (entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : []))
+		.map((message) =>
+			message.content
+				.filter((part) => part.type === "text")
+				.map((part) => part.text)
+				.join("\n"),
+		);
+}
+
 describe("explicit work completion", () => {
 	it("keeps work instructions out of auxiliary summary requests during active work", async () => {
 		let harness: Harness;
@@ -181,6 +204,74 @@ describe("explicit work completion", () => {
 		});
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
+	});
+
+	it("uses the configured continuation review model to continue after a declaration-only response", async () => {
+		const harness = await createHarness({
+			explicitWorkCompletion: true,
+			settings: { workContinuationReview: { enabled: true, model: "faux/faux-1" } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage("I will now run the approved verification."),
+			fauxAssistantMessage('{"continue":true}'),
+			finish(),
+		]);
+		await harness.session.prompt("Implement and verify");
+		expect(harness.session.workContract).toMatchObject({ status: "resolved", decision: { outcome: "completed" } });
+		expect(harness.faux.state.callCount).toBe(4);
+		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
+		expect(sessionAssistantTexts(harness)).not.toContain("I will now run the approved verification.");
+	});
+
+	it("omits a continued declaration-only response even when context-only messages are queued", async () => {
+		const harness = await createHarness({
+			explicitWorkCompletion: true,
+			settings: { workContinuationReview: { enabled: true, model: "faux/faux-1" } },
+		});
+		harnesses.push(harness);
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.content.some(
+					(part) => part.type === "text" && part.text === "I will now run the approved verification.",
+				)
+			) {
+				void harness.session.sendCustomMessage(
+					{ customType: "test-context", content: "Auxiliary context", display: false },
+					{ triggerTurn: false },
+				);
+			}
+		});
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage("I will now run the approved verification."),
+			fauxAssistantMessage('{"continue":true}'),
+			finish(),
+		]);
+		await harness.session.prompt("Implement and verify");
+		expect(harness.session.workContract).toMatchObject({ status: "resolved", decision: { outcome: "completed" } });
+		expect(assistantTexts(harness)).not.toContain("I will now run the approved verification.");
+		expect(sessionAssistantTexts(harness)).not.toContain("I will now run the approved verification.");
+	});
+
+	it("keeps the continuation review model configurable", async () => {
+		const harness = await createHarness({
+			explicitWorkCompletion: true,
+			settings: { workContinuationReview: { enabled: true, model: "faux-1" } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage("I will continue later."),
+			fauxAssistantMessage('{"continue":false}'),
+		]);
+		await harness.session.prompt("Implement and verify");
+		expect(harness.session.workContract).toMatchObject({ status: "suspended" });
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(sessionAssistantTexts(harness)).toContain("I will continue later.");
 	});
 
 	it("rejects a finish raced by follow-up input and processes that input before resolving", async () => {

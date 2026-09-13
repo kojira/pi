@@ -53,12 +53,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.m
 ## Development
 
 ```bash
-npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-npm run build         # Refresh model data, then build all packages
-npm run build:offline # Rebuild using existing model data without network access
-npm run check         # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+pnpm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
+pnpm run build         # Refresh model data, then build all packages
+pnpm run build:offline # Rebuild using existing model data without network access
+pnpm run check         # Lint, format, and type check
+./test.sh              # Run tests (skips LLM-dependent tests without API keys)
+./pi-test.sh           # Run pi from sources (can be run from any directory)
 ```
 
 ## Building standalone binaries from release source
@@ -76,16 +76,16 @@ The archive includes release model data and native prebuilds. `--offline-model-d
 
 ## Supply-chain hardening
 
-We treat npm dependency changes as reviewed code changes.
+We treat package dependency changes as reviewed code changes.
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
-- `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
-- `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
-- `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
-- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the root lockfile, to pin transitive deps for npm users.
-- Release smoke tests use `npm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
+- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged and are linked by pnpm in the workspace.
+- `.npmrc` sets `save-exact=true` and `minimum-release-age=10080` to avoid dependency releases from the last week during pnpm resolution.
+- `pnpm-lock.yaml` is the development dependency ground truth. `package-lock.json` remains an npm artifact source for published shrinkwrap and installer locks.
+- `pnpm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent shrinkwrap.
+- The published CLI package includes `packages/coding-agent/npm-shrinkwrap.json`, generated from the npm artifact lockfile, to pin transitive deps for npm users.
+- Release smoke tests use `pnpm run release:local` to build, pack, and create isolated npm and Bun installs outside the repo before tagging a release.
 - Local release installs, documented npm installs, and `pi update --self` use `--ignore-scripts` where supported.
-- CI installs with `npm ci --ignore-scripts`, and a scheduled GitHub workflow runs `npm audit --omit=dev` plus `npm audit signatures --omit=dev`.
+- CI installs with `pnpm install --frozen-lockfile --ignore-scripts`, and a scheduled GitHub workflow runs `pnpm audit --prod` plus `npm audit signatures --omit=dev`.
 - Shrinkwrap generation has an explicit allowlist for dependency lifecycle scripts; new lifecycle-script deps fail checks until reviewed.
 
 ## Share your OSS coding agent sessions

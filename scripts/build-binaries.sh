@@ -83,7 +83,7 @@ fi
 
 if [[ "$SKIP_INSTALL" == "false" ]]; then
     echo "==> Installing dependencies..."
-    npm ci --ignore-scripts
+    pnpm install --frozen-lockfile --ignore-scripts
 else
     echo "==> Skipping npm ci (--skip-install)"
 fi
@@ -91,10 +91,10 @@ fi
 if [[ "$SKIP_BUILD" == "false" ]]; then
     if [[ "$OFFLINE_MODEL_DATA" == "true" ]]; then
         echo "==> Building all packages with bundled model data..."
-        npm run build:offline
+        pnpm run build:offline
     else
         echo "==> Building all packages..."
-        npm run build
+        pnpm run build
     fi
 else
     echo "==> Skipping package build (--skip-build)"

@@ -1,5 +1,5 @@
 import type { Agent, AgentEvent, BeforeToolCallContext, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import type { SessionManager } from "./session-manager.ts";
@@ -146,13 +146,24 @@ export class WorkContractRuntime {
 
 	onEvent(event: AgentEvent): void {
 		if (event.type !== "message_end" || event.message.role !== "assistant" || !this.contract.active) return;
-		const message = event.message;
-		if (message.stopReason === "aborted") {
+		if (event.message.stopReason === "aborted") {
 			this.contract.suspend("Agent aborted");
-		} else if (message.stopReason !== "error" && !message.content.some((block) => block.type === "toolCall")) {
-			message.stopReason = "error";
-			message.errorMessage = "Active work contract received a text-only response instead of a required tool call";
-			this.contract.suspend(message.errorMessage);
 		}
+	}
+
+	isTextOnlyActiveResponse(message: AssistantMessage): boolean {
+		return (
+			this.contract.active &&
+			message.stopReason !== "aborted" &&
+			message.stopReason !== "error" &&
+			!message.content.some((block) => block.type === "toolCall")
+		);
+	}
+
+	suspendTextOnlyResponse(message: AssistantMessage, reason?: string): void {
+		message.stopReason = "error";
+		message.errorMessage =
+			reason ?? "Active work contract received a text-only response instead of a required tool call";
+		this.contract.suspend(message.errorMessage);
 	}
 }

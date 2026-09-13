@@ -49,8 +49,11 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Setup pnpm
+        run: corepack enable
+
       - name: Hydrate release model data
-        run: npm run hydrate:model-data
+        run: pnpm run hydrate:model-data
 
       - name: Create source archive
         run: |
@@ -315,7 +318,10 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-          cache: npm
+          cache: pnpm
+
+      - name: Setup pnpm
+        run: corepack enable
 
       - name: Install system dependencies
         run: |
@@ -324,19 +330,19 @@ jobs:
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build
-        run: npm run build
+        run: pnpm run build
 
       - name: Check
-        run: npm run check
+        run: pnpm run check
 
       - name: Test
-        run: npm test
+        run: pnpm test
 
       - name: Smoke-test packed npm consumer
-        run: npm run check:package-install
+        run: pnpm run check:package-install
 
       - name: Upgrade npm for trusted publishing
         run: |
@@ -374,6 +380,9 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
+
+      - name: Setup pnpm
+        run: corepack enable
 
       - name: Verify AWS CLI
         run: aws --version

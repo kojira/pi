@@ -34,6 +34,11 @@ export interface RetrySettings {
 	provider?: ProviderRetrySettings;
 }
 
+export interface WorkContinuationReviewSettings {
+	enabled?: boolean; // default: false
+	model?: string; // provider/model reference used to classify text-only active checkpoints
+}
+
 export type TuiMode = RendererTuiMode;
 export type FullscreenExitOutput = "transcript" | "resume-hint";
 
@@ -104,6 +109,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
+	workContinuationReview?: WorkContinuationReviewSettings;
 	hideThinkingBlock?: boolean;
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
@@ -884,6 +890,13 @@ export class SettingsManager {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+		};
+	}
+
+	getWorkContinuationReviewSettings(): { enabled: boolean; model: string | undefined } {
+		return {
+			enabled: this.settings.workContinuationReview?.enabled ?? false,
+			model: this.settings.workContinuationReview?.model?.trim() || undefined,
 		};
 	}
 

@@ -98,6 +98,7 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import { findExactModelReferenceMatch } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -726,6 +727,9 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			const deferActiveWorkTextOnlyAssistant =
+				event.message.role === "assistant" &&
+				this._workContractRuntime?.isTextOnlyActiveResponse(event.message as AssistantMessage) === true;
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -736,11 +740,11 @@ export class AgentSession {
 					event.message.details,
 				);
 			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+				!deferActiveWorkTextOnlyAssistant &&
+				(event.message.role === "user" || event.message.role === "assistant" || event.message.role === "toolResult")
 			) {
-				// Regular LLM message - persist as SessionMessageEntry
+				// Regular LLM message - persist as SessionMessageEntry. Active checkpoint text-only assistant
+				// messages are held until post-run review decides whether to continue or suspend.
 				this.sessionManager.appendMessage(event.message);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
@@ -1180,6 +1184,97 @@ export class AgentSession {
 		}
 	}
 
+	private async _shouldContinueActiveWorkAfterTextOnlyResponse(msg: AssistantMessage): Promise<boolean> {
+		const contractRuntime = this._workContractRuntime;
+		if (!contractRuntime?.isTextOnlyActiveResponse(msg)) {
+			return false;
+		}
+
+		const settings = this.settingsManager.getWorkContinuationReviewSettings();
+		if (!settings.enabled || !settings.model) {
+			contractRuntime.suspendTextOnlyResponse(msg);
+			this.sessionManager.appendMessage(msg);
+			return false;
+		}
+
+		let shouldContinue = false;
+		try {
+			const reviewModel = await this._resolveWorkContinuationReviewModel(settings.model);
+			if (!reviewModel) {
+				contractRuntime.suspendTextOnlyResponse(
+					msg,
+					`Active work contract received a text-only response; continuation review model not available: ${settings.model}`,
+				);
+				this.sessionManager.appendMessage(msg);
+				return false;
+			}
+			const review = await this._modelRuntime.completeSimple(reviewModel, {
+				systemPrompt:
+					"You classify whether an AI coding agent stopped after only declaring a next action. " +
+					'Return only JSON: {"continue":true|false}. ' +
+					"Use true only when the assistant says it will perform an already-authorized concrete next action and does not ask the user for a decision.",
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text:
+									`Active checkpoint:\n${JSON.stringify(contractRuntime.contract.state)}\n\n` +
+									`Assistant text-only response:\n${contentText(msg.content, "")}`,
+							},
+						],
+						timestamp: Date.now(),
+					},
+				],
+			});
+			shouldContinue = this._parseWorkContinuationReview(contentText(review.content, ""));
+		} catch (error) {
+			contractRuntime.suspendTextOnlyResponse(
+				msg,
+				`Active work contract received a text-only response; continuation review failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			this.sessionManager.appendMessage(msg);
+			return false;
+		}
+
+		if (!shouldContinue) {
+			contractRuntime.suspendTextOnlyResponse(msg);
+			this.sessionManager.appendMessage(msg);
+			return false;
+		}
+		this.agent.state.messages = this.agent.state.messages.filter((message) => message !== msg);
+		return true;
+	}
+
+	private async _resolveWorkContinuationReviewModel(reference: string): Promise<Model<any> | undefined> {
+		const configuredMatch = findExactModelReferenceMatch(reference, [...this._modelRuntime.getModels()]);
+		if (configuredMatch) return configuredMatch;
+		const availableSnapshot = this._modelRuntime.getAvailableSnapshot();
+		const snapshotMatch = findExactModelReferenceMatch(reference, [...availableSnapshot]);
+		if (snapshotMatch) return snapshotMatch;
+		try {
+			return findExactModelReferenceMatch(reference, [...(await this._modelRuntime.getAvailable())]);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private _parseWorkContinuationReview(text: string): boolean {
+		const trimmed = text.trim();
+		try {
+			const parsed = JSON.parse(trimmed) as unknown;
+			return (
+				typeof parsed === "object" &&
+				parsed !== null &&
+				"continue" in parsed &&
+				(parsed as { continue?: unknown }).continue === true
+			);
+		} catch {
+			return /^continue\s*[:=]?\s*true$/iu.test(trimmed) || trimmed.toLowerCase() === "true";
+		}
+	}
+
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const resumeAfterInLoopCompaction =
 			this._pendingInLoopCompactionContinuation && this._pendingInLoopCompactionSignal?.aborted !== true;
@@ -1206,6 +1301,10 @@ export class AgentSession {
 		}
 
 		if (await this._checkCompaction(msg)) {
+			return true;
+		}
+
+		if (await this._shouldContinueActiveWorkAfterTextOnlyResponse(msg)) {
 			return true;
 		}
 
