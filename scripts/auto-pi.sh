@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Developer wrapper that runs pi from this checkout's latest `npm run build`.
+# Developer wrapper that runs pi from this checkout's latest `pnpm run build`.
 # Development invocations use PI_EXPERIMENTAL=1 by default. Pass --stable to use
 # the next pi executable on PATH; `pi update` also uses stable so self-update
 # works.
@@ -67,7 +67,7 @@ fi
 
 dev_pi="$repo_dir/packages/coding-agent/dist/bundle/cli.js"
 if [[ ! -x "$dev_pi" ]]; then
-	echo "error: development pi build not found; run \`npm run build\` in $repo_dir" >&2
+	echo "error: development pi build not found; run \`pnpm run build\` in $repo_dir" >&2
 	exit 1
 fi
 

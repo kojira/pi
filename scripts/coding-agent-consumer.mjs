@@ -30,16 +30,15 @@ export function packReleasePackages(packages, tarballDirectory) {
 	for (const pkg of packages) {
 		const manifest = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (manifest.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const output = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory });
-		// npm <11.6 returns an array; newer npm can return an object keyed by package name.
+		const output = run("pnpm", ["pack", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory });
 		const parsed = JSON.parse(output);
-		const packed = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
-		tarballs.set(pkg.name, join(tarballDirectory, packed.filename));
+		const packed = Array.isArray(parsed) ? parsed[0] : parsed;
+		tarballs.set(pkg.name, resolve(tarballDirectory, packed.filename));
 	}
 	return tarballs;
 }
 
-export function installCodingAgentConsumer(directory, tarballs, packageManager = "npm") {
+export function installCodingAgentConsumer(directory, tarballs, packageManager = "pnpm") {
 	mkdirSync(directory, { recursive: true });
 	const overrides = Object.fromEntries([...tarballs].map(([name, path]) => [
 		name, `file:./${relative(directory, path).replaceAll("\\", "/")}`,
@@ -51,9 +50,10 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 		private: true,
 		dependencies: { [codingAgentName]: overrides[codingAgentName] },
 		overrides,
+		pnpm: { overrides },
 	};
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
-	const installArgs = packageManager === "bun" ? ["--production"] : ["--omit=dev", "--no-audit", "--no-fund"];
+	const installArgs = packageManager === "bun" ? ["--production"] : ["--prod", "--no-verify-store-integrity"];
 	run(packageManager, ["install", "--ignore-scripts", ...installArgs], { cwd: directory });
 }
 

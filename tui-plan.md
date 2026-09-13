@@ -945,8 +945,8 @@ Prefer inspecting component composition or using `VirtualTerminal`; do not use r
 After implementation changes:
 
 1. Run each modified/new focused test from the relevant package root using the repository-prescribed Vitest invocation.
-2. Run `npm run check` from the repository root and fix all errors, warnings, and infos.
-3. Do not run `npm test` or the full Vitest suite.
+2. Run `pnpm run check` from the repository root and fix all errors, warnings, and infos.
+3. Do not run the full Vitest suite.
 4. Optionally use the repository's `./test.sh` for all non-e2e tests if broader validation is warranted.
 5. Manually exercise alt mode in tmux using the procedure in `AGENTS.md`:
    - long transcript
@@ -979,7 +979,7 @@ After implementation changes:
 10. Add coding-agent grouping containers and the two small composition branches.
 11. Refactor custom footer replacement to use `footerContainer`.
 12. Add integration tests, docs, and changelog entries.
-13. Run focused tests and `npm run check`.
+13. Run focused tests and `pnpm run check`.
 14. Perform tmux/manual smoke tests in both modes.
 
 ## Acceptance criteria
@@ -998,4 +998,4 @@ The implementation is complete when:
 - Leaving alt mode prints the complete logical document once.
 - Layout boxes are internal and rebuilt per requested frame.
 - Expensive leaf rendering continues to use existing component caches.
-- All focused tests and `npm run check` pass.
+- All focused tests and `pnpm run check` pass.

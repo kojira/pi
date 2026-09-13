@@ -9,7 +9,7 @@
  * Steps:
  * 1. Check for uncommitted changes
  * 2. Verify every public workspace package is registered on npm
- * 3. Bump version via npm run version:xxx or set an explicit version
+ * 3. Bump version via pnpm run version:xxx or set an explicit version
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date
  * 5. Regenerate release artifacts
  * 6. Run checks and tests
@@ -144,7 +144,7 @@ function bumpOrSetVersion(target) {
 
 	if (BUMP_TYPES.has(target)) {
 		console.log(`Bumping version (${target})...`);
-		run(`npm run version:${target}`);
+		run(`pnpm run version:${target}`);
 	} else {
 		if (compareVersions(target, currentVersion) <= 0) {
 			console.error(`Error: explicit version ${target} must be greater than current version ${currentVersion}.`);
@@ -152,15 +152,14 @@ function bumpOrSetVersion(target) {
 		}
 
 		console.log(`Setting explicit version (${target})...`);
-		run(`npm version ${target} --workspaces --no-git-tag-version --no-workspaces-update && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts`);
+		run(`pnpm -r version ${target} --no-git-tag-version && node scripts/sync-versions.js && pnpm install --lockfile-only --ignore-scripts`);
 	}
 
-	// npm version can temporarily install the previous workspace versions before
-	// sync-versions updates inter-package ranges. Remove those stale lock entries,
-	// refresh the lockfile, then hydrate from the final dependency graph.
+	// Keep pnpm as the install source of truth; committed npm artifact locks are
+	// derived from existing metadata by local scripts and must not be refreshed via npm.
+	run("pnpm install --lockfile-only --ignore-scripts");
 	removeStaleWorkspaceLockEntries();
-	run("npm install --package-lock-only --ignore-scripts");
-	run("npm ci --ignore-scripts");
+	run("pnpm install --frozen-lockfile --ignore-scripts");
 	return getVersion();
 }
 
@@ -235,19 +234,19 @@ console.log();
 
 // 5. Regenerate release artifacts
 console.log("Regenerating release artifacts...");
-run("npm run generate:models");
-run("npm run check:model-data");
-run("npm run shrinkwrap:coding-agent");
-run("npm run install-lock:coding-agent");
+run("pnpm run generate:models");
+run("pnpm run check:model-data");
+run("pnpm run shrinkwrap:coding-agent");
+run("pnpm run install-lock:coding-agent");
 console.log();
 
 // 6. Run checks and tests
 console.log("Running checks...");
-run("npm run check");
+run("pnpm run check");
 console.log();
 
 console.log("Building packages for tests...");
-run("npm run build:offline");
+run("pnpm run build:offline");
 console.log();
 
 console.log("Running tests...");
@@ -255,7 +254,7 @@ run("./test.sh");
 console.log();
 
 console.log("Checking the packed coding-agent consumer install...");
-run("npm run check:package-install");
+run("pnpm run check:package-install");
 console.log();
 
 // 7. Commit and tag

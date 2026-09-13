@@ -9,13 +9,13 @@ Use them to measure end-to-end behavior and compare prompts, tools, skills, mode
 Run from the repository root with a default provider and model:
 
 ```bash
-npm run eval -- --provider openai --model gpt-5.6-sol
+pnpm run eval -- --provider openai --model gpt-5.6-sol
 ```
 
 The equivalent environment variables are:
 
 ```bash
-PI_PROVIDER=openai PI_MODEL=gpt-5.6-sol npm run eval
+PI_PROVIDER=openai PI_MODEL=gpt-5.6-sol pnpm run eval
 ```
 
 CLI values take precedence and become defaults for harnesses that do not select a model explicitly. Provider and model must be supplied together. The runner also allows no default when every executed harness configures its own model.
@@ -25,9 +25,9 @@ environment variables.
 Additional arguments are forwarded to Vitest:
 
 ```bash
-npm run eval -- src/extensions.eval.ts
-npm run eval -- -t "creates, reloads, and uses"
-npm run eval -- src/docs.eval.ts -t "session-format\.md"
+pnpm run eval -- src/extensions.eval.ts
+pnpm run eval -- -t "creates, reloads, and uses"
+pnpm run eval -- src/docs.eval.ts -t "session-format\.md"
 ```
 
 Each invocation prints an ignored `.eval/` artifact directory. `runs.jsonl` indexes completed harness runs and their

@@ -37,18 +37,19 @@ function run(command, args, options = {}) {
 
 function assertBuildOutputExists(directory) {
 	if (!existsSync(join(directory, "dist"))) {
-		throw new Error(`${directory}/dist does not exist. Run npm run build before publishing.`);
+		throw new Error(`${directory}/dist does not exist. Run pnpm run build before publishing.`);
 	}
 }
 
 function validatePack(directory) {
-	const result = run("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], { capture: true, cwd: directory });
-	const packed = JSON.parse(result.stdout)[0];
+	const result = run("pnpm", ["pack", "--dry-run", "--json"], { capture: true, cwd: directory });
+	const parsed = JSON.parse(result.stdout);
+	const packed = Array.isArray(parsed) ? parsed[0] : parsed;
 	console.log(`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`);
 }
 
 function isPublished(name, version) {
-	const result = spawnSync(commandForPlatform("npm"), ["view", `${name}@${version}`, "version", "--json"], {
+	const result = spawnSync(commandForPlatform("pnpm"), ["view", `${name}@${version}`, "version", "--json"], {
 		encoding: "utf8",
 		stdio: ["inherit", "pipe", "pipe"],
 	});
@@ -105,6 +106,6 @@ for (const pkg of packageStates) {
 		continue;
 	}
 
-	run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts"], { cwd: pkg.directory });
+	run("pnpm", ["publish", "--access", "public", "--provenance", "--ignore-scripts"], { cwd: pkg.directory });
 	console.log();
 }
