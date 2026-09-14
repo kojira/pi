@@ -99,6 +99,7 @@ describe("ExtensionRunner", () => {
 		getContextUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
+		pushSteeringRecipient: () => () => {},
 		getScopedModels: () => [],
 	};
 

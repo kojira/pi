@@ -308,6 +308,24 @@ export interface CompactOptions {
  */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+export interface ExtensionSteeringInput {
+	text: string;
+	images?: ImageContent[];
+	message: AgentMessage;
+}
+
+export interface ExtensionSteeringRecipient {
+	/** Stable diagnostic id for the current recipient, e.g. a subagent run or workflow key. */
+	id?: string;
+	/** Human-readable recipient kind/name for events and logs. */
+	label?: string;
+	/**
+	 * Queue or deliver a steering message to this active recipient.
+	 * Return false to decline delivery and let Pi keep the message on the parent queue.
+	 */
+	steer(input: ExtensionSteeringInput): boolean | undefined | Promise<boolean | undefined>;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -348,6 +366,11 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/**
+	 * Route incoming steering messages to a currently active nested recipient while this disposer is live.
+	 * Tools should register only while they are actively waiting on a child that can accept steering.
+	 */
+	pushSteeringRecipient(recipient: ExtensionSteeringRecipient): () => void;
 }
 
 /**
@@ -1747,6 +1770,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
+	pushSteeringRecipient: (recipient: ExtensionSteeringRecipient) => () => void;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
 }
 

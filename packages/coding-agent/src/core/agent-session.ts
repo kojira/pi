@@ -74,6 +74,7 @@ import {
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
+	type ExtensionSteeringRecipient,
 	type ExtensionUIContext,
 	type InputSource,
 	type MessageEndEvent,
@@ -156,6 +157,13 @@ export type AgentSessionEvent =
 			type: "queue_update";
 			steering: readonly string[];
 			followUp: readonly string[];
+	  }
+	| {
+			type: "steering_consumed";
+			message: string;
+			target: "recipient";
+			recipientId?: string;
+			recipientLabel?: string;
 	  }
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "entry_appended"; entry: SessionEntry }
@@ -330,6 +338,8 @@ export class AgentSession {
 	private _steeringMessages: string[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
+	/** Active nested recipients that may accept steering before the parent queue. */
+	private _steeringRecipients: ExtensionSteeringRecipient[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
@@ -1486,21 +1496,55 @@ export class AgentSession {
 		await this._queueFollowUp(expandedText, images);
 	}
 
+	/** Temporarily route steering to an active nested recipient, such as a running subagent. */
+	pushSteeringRecipient(recipient: ExtensionSteeringRecipient): () => void {
+		this._steeringRecipients.push(recipient);
+		let disposed = false;
+		return () => {
+			if (disposed) return;
+			disposed = true;
+			const index = this._steeringRecipients.lastIndexOf(recipient);
+			if (index !== -1) this._steeringRecipients.splice(index, 1);
+		};
+	}
+
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
-		this._steeringMessages.push(text);
-		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
 		}
-		this.agent.steer({
+		const message: AgentMessage = {
 			role: "user",
 			content,
 			timestamp: Date.now(),
-		});
+		};
+
+		const recipient = this._steeringRecipients.at(-1);
+		if (recipient) {
+			try {
+				const accepted = await recipient.steer({ text, images, message });
+				if (accepted !== false) {
+					this._emit({
+						type: "steering_consumed",
+						message: text,
+						target: "recipient",
+						recipientId: recipient.id,
+						recipientLabel: recipient.label,
+					});
+					return;
+				}
+			} catch {
+				// Fall back to the parent queue. Steering must remain deliverable even if a
+				// transient nested recipient disappears while the message is being routed.
+			}
+		}
+
+		this._steeringMessages.push(text);
+		this._emitQueueUpdate();
+		this.agent.steer(message);
 	}
 
 	/**
@@ -2722,6 +2766,7 @@ export class AgentSession {
 					})();
 				},
 				getSystemPrompt: () => this.systemPrompt,
+				pushSteeringRecipient: (recipient) => this.pushSteeringRecipient(recipient),
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
 			},
 			{

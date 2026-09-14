@@ -66,6 +66,49 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
+	it("routes steering to the active recipient before the parent queue", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const delivered: string[] = [];
+
+		const dispose = harness.session.pushSteeringRecipient({
+			id: "child-1",
+			label: "subagent",
+			steer: ({ text }) => {
+				delivered.push(text);
+				return undefined;
+			},
+		});
+		await harness.session.steer("interrupt child");
+		dispose();
+
+		expect(delivered).toEqual(["interrupt child"]);
+		expect(harness.session.getSteeringMessages()).toEqual([]);
+		expect(harness.eventsOfType("steering_consumed")).toEqual([
+			{
+				type: "steering_consumed",
+				message: "interrupt child",
+				target: "recipient",
+				recipientId: "child-1",
+				recipientLabel: "subagent",
+			},
+		]);
+	});
+
+	it("falls back to the parent queue when the active recipient declines steering", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		const dispose = harness.session.pushSteeringRecipient({
+			steer: () => false,
+		});
+		await harness.session.steer("keep for parent");
+		dispose();
+
+		expect(harness.session.getSteeringMessages()).toEqual(["keep for parent"]);
+		expect(harness.eventsOfType("steering_consumed")).toEqual([]);
+	});
+
 	it("dispatches extension commands immediately when prompted while idle", async () => {
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
