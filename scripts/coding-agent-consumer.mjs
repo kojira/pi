@@ -48,6 +48,7 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 	// for declared transitive dependencies without installing undeclared packages.
 	const manifest = {
 		private: true,
+		packageManager: JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).packageManager,
 		dependencies: { [codingAgentName]: overrides[codingAgentName] },
 		overrides,
 		pnpm: { overrides },
@@ -59,6 +60,13 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 
 function checkInstalledPackages(nodeModules, seen = new Set()) {
 	if (!existsSync(nodeModules)) return;
+	// pnpm stores transitive dependencies alongside, not inside, the real package directory.
+	const virtualStore = join(nodeModules, ".pnpm");
+	if (existsSync(virtualStore)) {
+		for (const entry of readdirSync(virtualStore)) {
+			checkInstalledPackages(join(virtualStore, entry, "node_modules"), seen);
+		}
+	}
 	const directories = readdirSync(nodeModules)
 		.filter((name) => !name.startsWith("."))
 		.flatMap((name) => name.startsWith("@")

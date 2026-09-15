@@ -1,5 +1,6 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { convertResponsesMessages } from "../../ai/src/api/openai-responses-shared.ts";
 import { TextWorkControl } from "../src/core/text-work-control.ts";
 import type { WorkContractRecord } from "../src/core/work-contract.ts";
 
@@ -62,6 +63,56 @@ describe("text control normalization", () => {
 			stopReason: "toolUse",
 		});
 		expect(new TextWorkControl().normalize(original, active).stopReason).toBe("error");
+	});
+
+	it.each(["<work-control", '<work-control>{"action":"finish"', "<work-control>{bad}</work-control>"])(
+		"hides malformed terminal control %s",
+		(suffix) => {
+			const result = new TextWorkControl().normalize(fauxAssistantMessage(`Report\n${suffix}`), active);
+			expect(result.content[0]).toMatchObject({ text: "Report" });
+			expect(result.content.at(-1)).toMatchObject({ name: "continue_work" });
+		},
+	);
+
+	it("serializes generated call/result pairs without provider-owned item IDs", () => {
+		const result = new TextWorkControl().normalize(fauxAssistantMessage(`Report\n${footer}`), active);
+		const call = result.content.at(-1);
+		if (call?.type !== "toolCall") throw new Error("Missing call");
+		const items = convertResponsesMessages(
+			{
+				id: result.model,
+				name: "Serialization fixture",
+				api: "openai-codex-responses",
+				provider: result.provider,
+				baseUrl: "https://example.invalid",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 10000,
+				maxTokens: 1000,
+			},
+			{
+				messages: [
+					result,
+					{
+						role: "toolResult",
+						toolCallId: call.id,
+						toolName: call.name,
+						content: [{ type: "text", text: "Report" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			new Set(["openai-codex"]),
+		);
+		expect(items.find((item) => item.type === "function_call")).toMatchObject({
+			call_id: call.id,
+			id: undefined,
+			name: "finish_work",
+		});
+		expect(items.find((item) => item.type === "function_call_output")).toMatchObject({ call_id: call.id });
+		expect(JSON.stringify(items)).not.toContain("<work-control>");
 	});
 
 	it("uses call IDs without fabricating provider item IDs", () => {
