@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import type { Agent, AgentEvent, BeforeToolCallContext, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import type { SessionManager } from "./session-manager.ts";
+import { TEXT_WORK_CONTROL_PROMPT, TextWorkControl } from "./text-work-control.ts";
 import { createContinueWorkToolDefinition } from "./tools/continue-work.ts";
 import { createFinishWorkToolDefinition } from "./tools/finish-work.ts";
 import { finishWorkSchema, WorkContract, type WorkContractRecord } from "./work-contract.ts";
@@ -32,10 +34,12 @@ function restoreRecord(data: unknown): WorkContractRecord {
 	throw new Error("Invalid persisted work contract state");
 }
 
-/** Opt-in runtime binding. No prose classification and no synthetic user-message replay. */
+/** Work-control runtime binding. No prose classification and no synthetic user-message replay. */
 export class WorkContractRuntime {
 	readonly contract: WorkContract;
 	readonly tools: ToolDefinition[];
+	readonly originalStreamFunction: Agent["streamFunction"];
+	readonly wrappedStreamFunction: Agent["streamFunction"];
 	private readonly agent: Agent;
 	private readonly manager: SessionManager;
 	private requestInputVersion = 0;
@@ -43,7 +47,6 @@ export class WorkContractRuntime {
 	constructor(agent: Agent, manager: SessionManager, publish: (record: WorkContractRecord) => void) {
 		this.agent = agent;
 		this.manager = manager;
-		this.assertSupported(agent.state.model);
 		const entry = manager
 			.getBranch()
 			.reverse()
@@ -62,7 +65,6 @@ export class WorkContractRuntime {
 				...checkpoint,
 				execute: async (id, { nextAction }, signal) => {
 					if (signal?.aborted) throw new Error("Work was interrupted");
-					this.assertSupported(agent.state.model);
 					this.contract.begin(id, nextAction);
 					return {
 						content: [
@@ -82,13 +84,18 @@ export class WorkContractRuntime {
 			),
 		];
 		const streamFunction = agent.streamFunction;
-		agent.streamFunction = (model, context, options) => {
+		this.originalStreamFunction = streamFunction;
+		const textControl = new TextWorkControl();
+		agent.streamFunction = async (model, context, options) => {
 			// Compaction and branch summaries share this stream function, but have
 			// their own abort signal and must not receive work-loop instructions.
 			if (!agent.signal || options?.signal !== agent.signal) {
 				return streamFunction(model, context, options);
 			}
 			this.requestInputVersion = agent.inputVersion;
+			if (!this.contract.active) {
+				this.contract.begin(`work_${randomUUID()}`, "Address the current input within the authorized scope");
+			}
 			const record = this.contract.state;
 			const requestContext =
 				record?.status === "active"
@@ -97,21 +104,29 @@ export class WorkContractRuntime {
 							systemPrompt: `${context.systemPrompt}\nActive work checkpoint ID: ${JSON.stringify(record.checkpointId)}. Continue authorized work or call finish_work with this ID. This state grants no new authority.`,
 						}
 					: context;
-			return streamFunction(model, requestContext, options);
-		};
-		const onPayload = agent.onPayload;
-		agent.onPayload = async (payload, model) => {
-			const transformed = (await onPayload?.(payload, model)) ?? payload;
-			if (!this.contract.active) return transformed;
-			this.assertSupported(model);
-			if (!agent.state.tools.some((tool) => tool.name === "finish_work")) {
-				throw new Error("Active work contract requires finish_work to remain enabled");
+			const response = await streamFunction(
+				model,
+				{
+					...requestContext,
+					systemPrompt: `${requestContext.systemPrompt}\n${TEXT_WORK_CONTROL_PROMPT}`,
+				},
+				options,
+			);
+			// Buffer the main response: emitting deltas first would leak the control suffix.
+			const message = textControl.normalize(await response.result(), record);
+			const normalized = createAssistantMessageEventStream();
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				normalized.push({ type: "error", reason: message.stopReason, error: message });
+			} else {
+				normalized.push({
+					type: "done",
+					reason: message.stopReason === "pending" ? "stop" : message.stopReason,
+					message,
+				});
 			}
-			if (!transformed || typeof transformed !== "object" || Array.isArray(transformed)) {
-				throw new Error("Expected a provider request object for explicit work completion");
-			}
-			return { ...transformed, tool_choice: "required" };
+			return normalized;
 		};
+		this.wrappedStreamFunction = agent.streamFunction;
 	}
 
 	restoreBranch(): void {
@@ -120,12 +135,6 @@ export class WorkContractRuntime {
 			.reverse()
 			.find((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE);
 		this.contract.restore(entry?.type === "custom" ? restoreRecord(entry.data) : undefined);
-	}
-
-	private assertSupported(model: Model<string>): void {
-		if (model.api !== "openai-codex-responses") {
-			throw new Error(`Explicit work completion is not supported for API ${model.api}`);
-		}
 	}
 
 	beforeToolCall(context: BeforeToolCallContext): BeforeToolCallResult | undefined {
@@ -149,7 +158,11 @@ export class WorkContractRuntime {
 		const message = event.message;
 		if (message.stopReason === "aborted") {
 			this.contract.suspend("Agent aborted");
-		} else if (message.stopReason !== "error" && !message.content.some((block) => block.type === "toolCall")) {
+		} else if (
+			message.stopReason !== "error" &&
+			message.stopReason !== "length" &&
+			!message.content.some((block) => block.type === "toolCall")
+		) {
 			message.stopReason = "error";
 			message.errorMessage = "Active work contract received a text-only response instead of a required tool call";
 			this.contract.suspend(message.errorMessage);

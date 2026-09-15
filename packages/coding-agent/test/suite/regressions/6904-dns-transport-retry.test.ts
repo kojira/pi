@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { createHarness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 const wrappedDnsLookupError =
 	"The pending stream has been canceled (caused by: getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com)";
@@ -11,7 +12,7 @@ describe("issue #6904 DNS transport failure retry", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: wrappedDnsLookupError }),
-				fauxAssistantMessage("recovered after DNS retry"),
+				workResponse("recovered after DNS retry"),
 			]);
 
 			await harness.session.prompt("test");

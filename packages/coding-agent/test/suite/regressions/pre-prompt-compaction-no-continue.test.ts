@@ -1,6 +1,7 @@
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 function createUsage(totalTokens: number) {
 	return {
@@ -58,7 +59,7 @@ describe("pre-prompt compaction regression", () => {
 		};
 		harness.sessionManager.appendMessage(lengthStopAssistant);
 		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		harness.setResponses([fauxAssistantMessage("answered next prompt")]);
+		harness.setResponses([workResponse("answered next prompt")]);
 		const continueSpy = vi.spyOn(harness.session.agent, "continue");
 
 		await expect(harness.session.prompt("next prompt")).resolves.toBeUndefined();

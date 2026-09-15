@@ -78,20 +78,37 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "continue_work", "dynamic_tool", "edit", "find", "grep", "ls", "powershell", "read", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["dynamic_tool"]);
+		).toEqual([
+			"bash",
+			"continue_work",
+			"dynamic_tool",
+			"edit",
+			"find",
+			"finish_work",
+			"grep",
+			"ls",
+			"powershell",
+			"read",
+			"write",
+		]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "dynamic_tool", "finish_work"]);
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- read:");
 		expect(session.systemPrompt).not.toContain("- bash:");
 		session.dispose();
 	});
 
-	it("still disables all tools when noTools is all", async () => {
+	it("disables all work tools but retains lifecycle controls when noTools is all", async () => {
 		const session = await createSession({ noTools: "all" });
 
-		expect(session.getAllTools()).toEqual([]);
-		expect(session.getActiveToolNames()).toEqual([]);
-		expect(session.systemPrompt).toContain("Available tools:\n(none)");
+		expect(
+			session
+				.getAllTools()
+				.map((tool) => tool.name)
+				.sort(),
+		).toEqual(["continue_work", "finish_work"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work"]);
+		expect(session.systemPrompt).not.toContain("- dynamic_tool:");
 		session.dispose();
 	});
 
@@ -111,8 +128,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			noTools: "builtin",
 		});
 
-		expect(session.getActiveToolNames()).toEqual([]);
-		expect(session.systemPrompt).toContain("Available tools:\n(none)");
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work"]);
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
 	});

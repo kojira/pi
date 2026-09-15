@@ -73,8 +73,8 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["dynamic_tool", "read"]);
-		expect(session.getActiveToolNames().sort()).toEqual(["dynamic_tool", "read"]);
+		).toEqual(["continue_work", "dynamic_tool", "finish_work", "read"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "dynamic_tool", "finish_work", "read"]);
 		expect(session.systemPrompt).toContain("- read: Read file contents");
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- bash:");
@@ -82,12 +82,17 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 		session.dispose();
 	});
 
-	it("disables all tools when the allowlist is empty", async () => {
+	it("disables work tools but retains lifecycle controls when the allowlist is empty", async () => {
 		const session = await createSession([]);
 
-		expect(session.getAllTools()).toEqual([]);
-		expect(session.getActiveToolNames()).toEqual([]);
-		expect(session.systemPrompt).toContain("Available tools:\n(none)");
+		expect(
+			session
+				.getAllTools()
+				.map((tool) => tool.name)
+				.sort(),
+		).toEqual(["continue_work", "finish_work"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work"]);
+		expect(session.systemPrompt).not.toContain("- bash:");
 		expect(session.systemPrompt).not.toContain("dynamic_tool");
 		session.dispose();
 	});

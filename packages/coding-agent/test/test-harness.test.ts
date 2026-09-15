@@ -9,6 +9,10 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, createHarnessWithExtensions, type Harness } from "./test-harness.ts";
 
+function final(text: string): string {
+	return `${text}\n<work-control>{"action":"finish","outcome":"completed","reason":"Fixture complete"}</work-control>`;
+}
+
 describe("test harness", () => {
 	let harness: Harness;
 
@@ -17,7 +21,7 @@ describe("test harness", () => {
 	});
 
 	it("simple text response", async () => {
-		harness = await createHarness({ responses: ["hello world"] });
+		harness = await createHarness({ responses: [final("hello world")] });
 
 		await harness.session.prompt("hi");
 
@@ -27,12 +31,13 @@ describe("test harness", () => {
 		expect(assistantMessages).toHaveLength(1);
 
 		const msg = assistantMessages[0] as AssistantMessage;
-		expect(msg.content).toEqual([{ type: "text", text: "hello world" }]);
-		expect(msg.stopReason).toBe("stop");
+		expect(msg.content[0]).toEqual({ type: "text", text: "hello world" });
+		expect(msg.content[1]).toMatchObject({ type: "toolCall", name: "finish_work" });
+		expect(harness.session.workContract?.status).toBe("resolved");
 	});
 
 	it("response sequence", async () => {
-		harness = await createHarness({ responses: ["first", "second", "third"] });
+		harness = await createHarness({ responses: [final("first"), final("second"), final("third")] });
 
 		await harness.session.prompt("a");
 		await harness.session.prompt("b");
@@ -61,7 +66,7 @@ describe("test harness", () => {
 		};
 
 		harness = await createHarness({
-			responses: [{ toolCalls: [{ name: "echo", args: { text: "hi" } }] }, "done after tool"],
+			responses: [{ toolCalls: [{ name: "echo", args: { text: "hi" } }] }, final("done after tool")],
 			tools: [echoTool],
 			baseToolsOverride: { echo: echoTool },
 		});
@@ -72,7 +77,8 @@ describe("test harness", () => {
 		expect(harness.faux.callCount).toBe(2);
 
 		const toolResults = harness.session.messages.filter((m) => m.role === "toolResult");
-		expect(toolResults).toHaveLength(1);
+		expect(toolResults).toHaveLength(2);
+		expect(toolResults.map((result) => result.toolName)).toEqual(["echo", "finish_work"]);
 	});
 
 	it("error response", async () => {
@@ -104,7 +110,7 @@ describe("test harness", () => {
 
 	it("retry on transient error", async () => {
 		harness = await createHarness({
-			responses: [{ error: "overloaded_error" }, "recovered"],
+			responses: [{ error: "overloaded_error" }, final("recovered")],
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 
@@ -122,7 +128,7 @@ describe("test harness", () => {
 
 	it("custom usage numbers", async () => {
 		harness = await createHarness({
-			responses: [{ text: "big response", usage: { input: 100000, output: 5000 } }],
+			responses: [{ text: final("big response"), usage: { input: 100000, output: 5000 } }],
 		});
 
 		await harness.session.prompt("hi");
@@ -133,7 +139,7 @@ describe("test harness", () => {
 	});
 
 	it("event capture", async () => {
-		harness = await createHarness({ responses: ["hello"] });
+		harness = await createHarness({ responses: [final("hello")] });
 
 		await harness.session.prompt("hi");
 
@@ -148,7 +154,7 @@ describe("test harness", () => {
 	});
 
 	it("context capture", async () => {
-		harness = await createHarness({ responses: ["reply"] });
+		harness = await createHarness({ responses: [final("reply")] });
 
 		await harness.session.prompt("my question");
 
@@ -159,7 +165,7 @@ describe("test harness", () => {
 	});
 
 	it("wraps around when more calls than responses", async () => {
-		harness = await createHarness({ responses: ["a", "b"] });
+		harness = await createHarness({ responses: [final("a"), final("b")] });
 
 		await harness.session.prompt("1");
 		await harness.session.prompt("2");
@@ -174,41 +180,31 @@ describe("test harness", () => {
 		expect(texts).toEqual(["a", "b", "a"]);
 	});
 
-	it("streams text deltas", async () => {
-		harness = await createHarness({ responses: ["hello world"] });
+	it("buffers text until the work decision is normalized", async () => {
+		harness = await createHarness({ responses: [final("hello world")] });
 
 		await harness.session.prompt("hi");
 
-		const updates = harness.eventsOfType("message_update");
-		const textDeltas = updates.filter((e) => e.assistantMessageEvent.type === "text_delta");
-		expect(textDeltas.length).toBeGreaterThan(0);
-
-		// Deltas should reconstruct the full text
-		const reconstructed = textDeltas.map((e) => (e.assistantMessageEvent as { delta: string }).delta).join("");
-		expect(reconstructed).toBe("hello world");
+		expect(harness.eventsOfType("message_update")).toEqual([]);
+		expect(harness.session.getLastAssistantText()).toBe("hello world");
+		expect(JSON.stringify(harness.events)).not.toContain("<work-control>");
 	});
 
-	it("streams thinking deltas", async () => {
+	it("preserves thinking in buffered responses", async () => {
 		harness = await createHarness({
-			responses: [{ thinking: "let me think about this", text: "answer" }],
+			responses: [{ thinking: "let me think about this", text: final("answer") }],
 		});
 
 		await harness.session.prompt("hi");
 
-		const updates = harness.eventsOfType("message_update");
-		const thinkingStarts = updates.filter((e) => e.assistantMessageEvent.type === "thinking_start");
-		const thinkingDeltas = updates.filter((e) => e.assistantMessageEvent.type === "thinking_delta");
-		const thinkingEnds = updates.filter((e) => e.assistantMessageEvent.type === "thinking_end");
-
-		expect(thinkingStarts).toHaveLength(1);
-		expect(thinkingDeltas.length).toBeGreaterThan(0);
-		expect(thinkingEnds).toHaveLength(1);
-
-		const reconstructed = thinkingDeltas.map((e) => (e.assistantMessageEvent as { delta: string }).delta).join("");
-		expect(reconstructed).toBe("let me think about this");
+		expect(harness.eventsOfType("message_update")).toEqual([]);
+		const response = harness.session.messages.find((message) => message.role === "assistant");
+		expect(response).toMatchObject({
+			content: expect.arrayContaining([{ type: "thinking", thinking: "let me think about this" }]),
+		});
 	});
 
-	it("streams tool call deltas", async () => {
+	it("preserves tool calls in buffered responses", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -218,24 +214,21 @@ describe("test harness", () => {
 		};
 
 		harness = await createHarness({
-			responses: [{ toolCalls: [{ name: "echo", args: { text: "hi" } }] }, "done"],
+			responses: [{ toolCalls: [{ name: "echo", args: { text: "hi" } }] }, final("done")],
 			tools: [echoTool],
 			baseToolsOverride: { echo: echoTool },
 		});
 
 		await harness.session.prompt("use tool");
 
-		const updates = harness.eventsOfType("message_update");
-		const toolcallStarts = updates.filter((e) => e.assistantMessageEvent.type === "toolcall_start");
-		const toolcallDeltas = updates.filter((e) => e.assistantMessageEvent.type === "toolcall_delta");
-		const toolcallEnds = updates.filter((e) => e.assistantMessageEvent.type === "toolcall_end");
-
-		expect(toolcallStarts).toHaveLength(1);
-		expect(toolcallDeltas.length).toBeGreaterThan(0);
-		expect(toolcallEnds).toHaveLength(1);
+		expect(harness.eventsOfType("message_update")).toEqual([]);
+		const response = harness.session.messages.find((message) => message.role === "assistant");
+		expect(response).toMatchObject({
+			content: [expect.objectContaining({ type: "toolCall", name: "echo", arguments: { text: "hi" } })],
+		});
 	});
 
-	it("streams thinking then text then tool call in order", async () => {
+	it("preserves thinking, text, and tool call ordering after buffering", async () => {
 		const echoTool: AgentTool = {
 			name: "echo",
 			label: "Echo",
@@ -251,7 +244,7 @@ describe("test harness", () => {
 					text: "I will call a tool",
 					toolCalls: [{ name: "echo", args: { text: "x" } }],
 				},
-				"final",
+				final("final"),
 			],
 			tools: [echoTool],
 			baseToolsOverride: { echo: echoTool },
@@ -259,16 +252,11 @@ describe("test harness", () => {
 
 		await harness.session.prompt("do it");
 
-		const updates = harness.eventsOfType("message_update");
-		const streamTypes = updates.map((e) => e.assistantMessageEvent.type);
-
-		// Thinking events should come before text events, text before toolcall
-		const firstThinking = streamTypes.indexOf("thinking_start");
-		const firstText = streamTypes.indexOf("text_start");
-		const firstToolcall = streamTypes.indexOf("toolcall_start");
-
-		expect(firstThinking).toBeLessThan(firstText);
-		expect(firstText).toBeLessThan(firstToolcall);
+		expect(harness.eventsOfType("message_update")).toEqual([]);
+		const response = harness.session.messages.find(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(response?.content.map((block) => block.type)).toEqual(["thinking", "text", "toolCall"]);
 	});
 
 	it("loads inline extension factories and disambiguates duplicate commands", async () => {
@@ -324,7 +312,7 @@ describe("test harness", () => {
 	});
 
 	it("session persistence works", async () => {
-		harness = await createHarness({ responses: ["persisted"] });
+		harness = await createHarness({ responses: [final("persisted")] });
 
 		await harness.session.prompt("hi");
 

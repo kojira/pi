@@ -9,6 +9,7 @@ import {
 	createAgentSessionFromServices,
 } from "../../../src/core/agent-session-runtime.ts";
 import { createHarness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 describe("regression #8724: in-memory fork during an active tool turn", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -68,7 +69,7 @@ describe("regression #8724: in-memory fork during an active tool turn", () => {
 		});
 
 		harness.setResponses([
-			fauxAssistantMessage("first response"),
+			workResponse("first response"),
 			fauxAssistantMessage(fauxToolCall("block", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage("unused after abort"),
 		]);
@@ -90,7 +91,7 @@ describe("regression #8724: in-memory fork during an active tool turn", () => {
 		harness.setResponses([
 			(context) => {
 				capturedRoles = context.messages.map((message) => message.role);
-				return fauxAssistantMessage("next response");
+				return workResponse("next response");
 			},
 		]);
 		await runtime.session.prompt("next prompt");

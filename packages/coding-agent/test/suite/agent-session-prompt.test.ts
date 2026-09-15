@@ -10,6 +10,7 @@ import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 describe("AgentSession prompt characterization", () => {
 	const harnesses: Harness[] = [];
@@ -31,11 +32,11 @@ describe("AgentSession prompt characterization", () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		harness.setResponses([fauxAssistantMessage("hello")]);
+		harness.setResponses([workResponse("hello")]);
 
 		await harness.session.prompt("hi");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		expect(getMessageText(harness.session.messages[0]!)).toBe("hi");
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
@@ -61,7 +62,7 @@ describe("AgentSession prompt characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("echo", { text: "hello" }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		await harness.session.prompt("start");
@@ -72,6 +73,7 @@ describe("AgentSession prompt characterization", () => {
 			"assistant",
 			"toolResult",
 			"assistant",
+			"toolResult",
 		]);
 		expect(harness.session.messages[2]?.role).toBe("toolResult");
 		expect(harness.session.messages[3]?.role).toBe("assistant");
@@ -104,15 +106,15 @@ describe("AgentSession prompt characterization", () => {
 			}),
 			(context) => {
 				const toolResults = context.messages.filter((message) => message.role === "toolResult");
-				return fauxAssistantMessage(`tool results: ${toolResults.length}`);
+				return workResponse(`tool results: ${toolResults.length}`);
 			},
 		]);
 
 		await harness.session.prompt("run tools");
 
 		expect(toolRuns.sort()).toEqual(["fast:b", "slow:a"]);
-		expect(harness.session.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
-		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("assistant");
+		expect(harness.session.messages.filter((message) => message.role === "toolResult")).toHaveLength(3);
+		expect(harness.session.getLastAssistantText()).toBe("tool results: 2");
 	});
 
 	it("preserves image attachments in the provider context", async () => {
@@ -314,11 +316,11 @@ describe("AgentSession prompt characterization", () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		harness.setResponses([fauxAssistantMessage("response")]);
+		harness.setResponses([workResponse("response")]);
 
 		await harness.session.sendUserMessage("from extension");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
 		expect(getMessageText(harness.session.messages[0]!)).toBe("from extension");
 	});
 

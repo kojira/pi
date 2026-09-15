@@ -209,8 +209,6 @@ function withoutDeletedHeaders(headers: ProviderHeaders | undefined): Record<str
 }
 
 export interface AgentSessionConfig {
-	/** Opt in to persisted work contracts and required explicit finish decisions. Codex Responses only. */
-	explicitWorkCompletion?: boolean;
 	agent: Agent;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
@@ -388,10 +386,10 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
-	private _workContractRuntime?: WorkContractRuntime;
+	private readonly _workContractRuntime: WorkContractRuntime;
 
 	get workContract(): WorkContractRecord | undefined {
-		return this._workContractRuntime?.contract.state;
+		return this._workContractRuntime.contract.state;
 	}
 
 	// Tool registry for extension getTools/setTools
@@ -421,17 +419,10 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
-		if (config.explicitWorkCompletion) {
-			for (const name of ["continue_work", "finish_work"]) {
-				if ((this._allowedToolNames && !this._allowedToolNames.has(name)) || this._excludedToolNames?.has(name)) {
-					throw new Error(`Explicit work completion requires ${name} to be allowed`);
-				}
-			}
-			this._workContractRuntime = new WorkContractRuntime(this.agent, this.sessionManager, (record) => {
-				this._emit({ type: "work_contract", record });
-			});
-			this._customTools.push(...this._workContractRuntime.tools);
-		}
+		this._workContractRuntime = new WorkContractRuntime(this.agent, this.sessionManager, (record) => {
+			this._emit({ type: "work_contract", record });
+		});
+		this._customTools.push(...this._workContractRuntime.tools);
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -492,7 +483,11 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		env?: Record<string, string>;
 	}> {
-		if (this.agent.streamFunction === streamSimple) {
+		if (
+			this.agent.streamFunction === streamSimple ||
+			(this.agent.streamFunction === this._workContractRuntime.wrappedStreamFunction &&
+				this._workContractRuntime.originalStreamFunction === streamSimple)
+		) {
 			return this._getRequiredRequestAuth(model);
 		}
 
@@ -521,7 +516,7 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async (context) => {
-			const blocked = this._workContractRuntime?.beforeToolCall(context);
+			const blocked = this._workContractRuntime.beforeToolCall(context);
 			if (blocked) return blocked;
 			const { toolCall, args } = context;
 			const runner = this._extensionRunner;
@@ -684,7 +679,7 @@ export class AgentSession {
 		this._isAgentRunActive = false;
 		try {
 			try {
-				this._workContractRuntime?.contract.suspend("Agent settled without an explicit finish decision");
+				this._workContractRuntime.contract.suspend("Agent settled without an explicit finish decision");
 			} finally {
 				await this._extensionRunner.emit({ type: "agent_settled" });
 				this._emit({ type: "agent_settled" });
@@ -729,7 +724,7 @@ export class AgentSession {
 		// Emit to extensions first
 		await this._emitExtensionEvent(event);
 
-		this._workContractRuntime?.onEvent(event);
+		this._workContractRuntime.onEvent(event);
 
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -953,7 +948,7 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
-			this._workContractRuntime?.contract.suspend("Session disposed");
+			this._workContractRuntime.contract.suspend("Session disposed");
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -1039,7 +1034,8 @@ export class AgentSession {
 	setActiveToolsByName(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
-		for (const name of toolNames) {
+		// Lifecycle controls do not grant access to work tools and cannot be disabled with them.
+		for (const name of new Set([...toolNames, ...this._workContractRuntime.tools.map((tool) => tool.name)])) {
 			const tool = this._toolRegistry.get(name);
 			if (tool) {
 				tools.push(tool);
@@ -1200,6 +1196,8 @@ export class AgentSession {
 		if (!msg) {
 			return resumeAfterInLoopCompaction;
 		}
+		// Cancellation must not start a fresh run merely because input remains queued.
+		if (msg.stopReason === "aborted") return false;
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			return true;
@@ -1215,7 +1213,9 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(msg)) {
+		// A run ending at a tool boundary was terminated by that tool. Defer maintenance
+		// until new input; do not restart or compact after its stop decision.
+		if (msg.stopReason !== "toolUse" && (await this._checkCompaction(msg))) {
 			return true;
 		}
 
@@ -2792,7 +2792,8 @@ export class AgentSession {
 		const allowedToolNames = this._allowedToolNames;
 		const excludedToolNames = this._excludedToolNames;
 		const isAllowedTool = (name: string): boolean =>
-			(!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name);
+			this._workContractRuntime.tools.some((tool) => tool.name === name) ||
+			((!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name));
 
 		const registeredTools = this._extensionRunner.getAllRegisteredTools();
 		const allCustomTools = [
@@ -3404,7 +3405,7 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			this._workContractRuntime?.restoreBranch();
+			this._workContractRuntime.restoreBranch();
 
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();

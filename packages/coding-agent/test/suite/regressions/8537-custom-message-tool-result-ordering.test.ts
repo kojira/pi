@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { convertToLlm } from "../../../src/core/messages.ts";
 import { createHarness, type Harness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 function roles(messages: AgentMessage[]): string[] {
 	return messages.map((message) => message.role);
@@ -43,12 +44,19 @@ describe("#8537 custom messages injected during tool execution", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("wait", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		await harness.session.prompt("hi");
 
-		expect(roles(harness.session.messages)).toEqual(["user", "assistant", "toolResult", "custom", "assistant"]);
+		expect(roles(harness.session.messages)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"custom",
+			"assistant",
+			"toolResult",
+		]);
 	});
 
 	it("keeps session entries and message events in the same order as agent state", async () => {
@@ -74,7 +82,7 @@ describe("#8537 custom messages injected during tool execution", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("wait", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		await harness.session.prompt("hi");
@@ -84,13 +92,13 @@ describe("#8537 custom messages injected during tool execution", () => {
 			.flatMap((entry) =>
 				entry.type === "message" ? [entry.message.role] : entry.type === "custom_message" ? ["custom"] : [],
 			);
-		expect(entryKinds).toEqual(["user", "assistant", "toolResult", "custom", "assistant"]);
+		expect(entryKinds).toEqual(["user", "assistant", "toolResult", "custom", "assistant", "toolResult"]);
 
 		// message events must never describe a message the session tree does not contain yet
 		const messageStarts = harness.events.flatMap((event) =>
 			event.type === "message_start" ? [event.message.role] : [],
 		);
-		expect(messageStarts).toEqual(["user", "assistant", "toolResult", "custom", "assistant"]);
+		expect(messageStarts).toEqual(["user", "assistant", "toolResult", "custom", "assistant", "toolResult"]);
 	});
 
 	it("produces an llm history where every tool result follows its tool call", async () => {
@@ -116,8 +124,8 @@ describe("#8537 custom messages injected during tool execution", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("wait", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
-			fauxAssistantMessage("second turn"),
+			workResponse("done"),
+			workResponse("second turn"),
 		]);
 
 		await harness.session.prompt("hi");

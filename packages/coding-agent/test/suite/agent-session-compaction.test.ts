@@ -12,6 +12,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
@@ -201,7 +202,7 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		seedCompactableSession(harness);
-		harness.setResponses([fauxAssistantMessage("queued response")]);
+		harness.setResponses([workResponse("queued response")]);
 
 		let queuedPrompt: Promise<void> | undefined;
 		harness.session.subscribe((event) => {
@@ -405,7 +406,7 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("partial response", { stopReason: "length" }),
-			fauxAssistantMessage("completed response"),
+			workResponse("completed response"),
 		]);
 
 		await harness.session.prompt("x".repeat(5000));
@@ -452,13 +453,13 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		let resumedRequest = "";
 		harness.setResponses([
-			fauxAssistantMessage(`old-history:${"a".repeat(800)}`),
-			fauxAssistantMessage(`recent-history:${"b".repeat(800)}`),
+			workResponse(`old-history:${"a".repeat(800)}`),
+			workResponse(`recent-history:${"b".repeat(800)}`),
 			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
 			(context) => {
 				order.push("provider");
 				resumedRequest = JSON.stringify(context.messages);
-				return fauxAssistantMessage("finished after compaction");
+				return workResponse("finished after compaction");
 			},
 		]);
 
@@ -630,14 +631,14 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		let resumedRequest = "";
 		harness.setResponses([
-			fauxAssistantMessage(`old-history:${"a".repeat(800)}`),
-			fauxAssistantMessage(`recent-history:${"b".repeat(800)}`),
+			workResponse(`old-history:${"a".repeat(800)}`),
+			workResponse(`recent-history:${"b".repeat(800)}`),
 			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
 			(context) => {
 				resumedRequest = JSON.stringify(context.messages);
-				return fauxAssistantMessage("finished after compaction");
+				return workResponse("finished after compaction");
 			},
-			fauxAssistantMessage("finished after delayed steering"),
+			workResponse("finished after delayed steering"),
 		]);
 
 		await harness.session.prompt("seed old history");
@@ -683,8 +684,8 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage(`old-history:${"a".repeat(800)}`),
-			fauxAssistantMessage(`recent-history:${"b".repeat(800)}`),
+			workResponse(`old-history:${"a".repeat(800)}`),
+			workResponse(`recent-history:${"b".repeat(800)}`),
 			fauxAssistantMessage(fauxToolCall("terminate_with_large_result", {}), { stopReason: "toolUse" }),
 		]);
 
@@ -786,7 +787,7 @@ describe("AgentSession compaction characterization", () => {
 	it("aborts an in-progress manual compaction and waits until the session is idle", async () => {
 		const { harness, compactionStarted } = await createAbortableCompactionHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("continued")]);
+		harness.setResponses([workResponse("continued")]);
 
 		const compactPromise = harness.session.compact();
 		const compactExpectation = expect(compactPromise).rejects.toThrow("Compaction cancelled");
@@ -823,7 +824,7 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		harness.setResponses([workResponse("one"), workResponse("two")]);
 		await harness.session.prompt("first");
 		await harness.session.prompt("second");
 
@@ -866,7 +867,7 @@ describe("AgentSession compaction characterization", () => {
 		);
 	});
 
-	it("compacts successful overflow responses without retrying", async () => {
+	it("defers compaction after a finish decision until the next input", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
 			models: [{ id: "faux-1", contextWindow: 1, maxTokens: 100 }],
@@ -884,17 +885,19 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("completed answer")]);
+		harness.setResponses([workResponse("completed answer"), workResponse("next answer")]);
 
 		await expect(harness.session.prompt("hello")).resolves.toBeUndefined();
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(0);
+		expect(harness.faux.state.callCount).toBe(1);
 
-		const compactionEnd = harness.eventsOfType("compaction_end").at(-1);
-		expect(compactionEnd).toMatchObject({
-			reason: "overflow",
+		await harness.session.prompt("next input");
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "threshold",
 			aborted: false,
 			willRetry: false,
 		});
-		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.faux.state.callCount).toBe(2);
 	});
 
 	it("ignores stale pre-compaction assistant usage on pre-prompt checks", async () => {

@@ -2,6 +2,7 @@ import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi
 import { afterEach, describe, expect, it } from "vitest";
 import { createContinueWorkTool } from "../../src/core/tools/continue-work.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 describe("continue_work lifecycle", () => {
 	const harnesses: Harness[] = [];
@@ -26,7 +27,7 @@ describe("continue_work lifecycle", () => {
 				],
 				{ stopReason: "toolUse" },
 			),
-			fauxAssistantMessage("Smoke test passed."),
+			workResponse("Smoke test passed."),
 		]);
 
 		await harness.session.prompt("Implement and test the change");
@@ -38,6 +39,7 @@ describe("continue_work lifecycle", () => {
 			"assistant",
 			"toolResult",
 			"assistant",
+			"toolResult",
 		]);
 		const toolResult = harness.session.messages.find((message) => message.role === "toolResult");
 		expect(toolResult).toMatchObject({
@@ -59,7 +61,7 @@ describe("continue_work lifecycle", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("continue_work", { nextAction: "" }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("The checkpoint was rejected."),
+			workResponse("The checkpoint was rejected."),
 		]);
 
 		await harness.session.prompt("test invalid checkpoint");

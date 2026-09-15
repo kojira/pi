@@ -72,7 +72,8 @@ const httpsProxyAgentNamedExportPlugin = {
 			() => ({
 				contents: 'export { HttpsProxyAgent } from "https-proxy-agent";',
 				loader: "js",
-				resolveDir: repoRoot,
+				// The dependency belongs to pi-ai, not the monorepo root (pnpm isolation).
+				resolveDir: aiDistDir,
 			}),
 		);
 	},

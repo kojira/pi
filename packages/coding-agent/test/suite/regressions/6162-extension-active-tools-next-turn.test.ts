@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 describe("extension active tools next-turn refresh", () => {
 	it("applies pi.setActiveTools before the next provider request in the same run", async () => {
@@ -51,16 +52,19 @@ describe("extension active tools next-turn refresh", () => {
 				},
 				(context) => {
 					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
-					return fauxAssistantMessage("done");
+					return workResponse("done");
 				},
 			]);
 
-			expect(harness.session.getActiveToolNames()).toEqual(["switch_tools"]);
+			expect(harness.session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work", "switch_tools"]);
 
 			await harness.session.prompt("start");
 
-			expect(harness.session.getActiveToolNames()).toEqual(["after_switch"]);
-			expect(providerToolNames).toEqual([["switch_tools"], ["after_switch"]]);
+			expect(harness.session.getActiveToolNames().sort()).toEqual(["after_switch", "continue_work", "finish_work"]);
+			expect(providerToolNames).toEqual([
+				["continue_work", "finish_work", "switch_tools"],
+				["after_switch", "continue_work", "finish_work"],
+			]);
 		} finally {
 			harness.cleanup();
 		}
@@ -109,13 +113,18 @@ describe("extension active tools next-turn refresh", () => {
 							.filter((message) => message.role === "toolResult")
 							.flatMap((message) => message.addedToolNames ?? []),
 					);
-					return fauxAssistantMessage("done");
+					return workResponse("done");
 				},
 			]);
 
 			await harness.session.prompt("start");
 
-			expect(harness.session.getActiveToolNames()).toEqual(["load_more_tools", "after_load"]);
+			expect(harness.session.getActiveToolNames().sort()).toEqual([
+				"after_load",
+				"continue_work",
+				"finish_work",
+				"load_more_tools",
+			]);
 			expect(addedToolNames).toEqual([["after_load"]]);
 		} finally {
 			harness.cleanup();
@@ -175,13 +184,16 @@ describe("extension active tools next-turn refresh", () => {
 				(context) => {
 					providerSystemPrompts.push(context.systemPrompt ?? "");
 					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
-					return fauxAssistantMessage("done");
+					return workResponse("done");
 				},
 			]);
 
 			await harness.session.prompt("start");
 
-			expect(providerToolNames).toEqual([["switch_tools"], ["after_switch"]]);
+			expect(providerToolNames).toEqual([
+				["continue_work", "finish_work", "switch_tools"],
+				["after_switch", "continue_work", "finish_work"],
+			]);
 			expect(providerSystemPrompts).toHaveLength(2);
 			expect(providerSystemPrompts[0]).toContain("keep this run override");
 			expect(providerSystemPrompts[1]).toContain("keep this run override");

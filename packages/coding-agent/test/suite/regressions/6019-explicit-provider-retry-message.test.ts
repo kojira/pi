@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { createHarness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 const openAIExplicitRetryMessage =
 	"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_******** in your message.";
@@ -16,7 +17,7 @@ describe("regression: issue 6019 explicit provider retry messages", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage("", { stopReason: "error", errorMessage }),
-				fauxAssistantMessage("recovered"),
+				workResponse("recovered"),
 			]);
 
 			await harness.session.prompt("test");

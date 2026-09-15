@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 async function createWaitingHarness(
 	options: {
@@ -150,7 +151,7 @@ describe("AgentSession queue characterization", () => {
 				const sawSteer = context.messages.some(
 					(message) => message.role === "user" && getMessageText(message) === "steer now",
 				);
-				return fauxAssistantMessage(sawSteer ? "saw steer" : "missing steer");
+				return workResponse(sawSteer ? "saw steer" : "missing steer");
 			},
 		]);
 
@@ -184,7 +185,7 @@ describe("AgentSession queue characterization", () => {
 								.join("\n"),
 						),
 				);
-				return fauxAssistantMessage("follow-up response");
+				return workResponse("follow-up response");
 			},
 		]);
 
@@ -205,8 +206,8 @@ describe("AgentSession queue characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("handled steer 1"),
-			fauxAssistantMessage("handled steer 2"),
+			workResponse("handled steer 1"),
+			workResponse("handled steer 2"),
 		]);
 
 		await waitForToolStart;
@@ -226,9 +227,9 @@ describe("AgentSession queue characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("original turn complete"),
-			fauxAssistantMessage("handled follow-up 1"),
-			fauxAssistantMessage("handled follow-up 2"),
+			workResponse("original turn complete"),
+			workResponse("handled follow-up 1"),
+			workResponse("handled follow-up 2"),
 		]);
 
 		await waitForToolStart;
@@ -259,7 +260,7 @@ describe("AgentSession queue characterization", () => {
 				batchedUserMessages = context.messages
 					.filter((message) => message.role === "user")
 					.map((message) => getMessageText(message));
-				return fauxAssistantMessage("batched steer response");
+				return workResponse("batched steer response");
 			},
 		]);
 
@@ -282,12 +283,12 @@ describe("AgentSession queue characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("original turn complete"),
+			workResponse("original turn complete"),
 			(context) => {
 				batchedUserMessages = context.messages
 					.filter((message) => message.role === "user")
 					.map((message) => getMessageText(message));
-				return fauxAssistantMessage("batched follow-up response");
+				return workResponse("batched follow-up response");
 			},
 		]);
 
@@ -316,7 +317,7 @@ describe("AgentSession queue characterization", () => {
 						typeof message.content !== "string" &&
 						message.content.some((part) => part.type === "text" && part.text === "steer custom"),
 				);
-				return fauxAssistantMessage("done");
+				return workResponse("done");
 			},
 		]);
 
@@ -342,7 +343,7 @@ describe("AgentSession queue characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("original turn complete"),
+			workResponse("original turn complete"),
 			(context) => {
 				sawCustomMessage = context.messages.some(
 					(message) =>
@@ -350,7 +351,7 @@ describe("AgentSession queue characterization", () => {
 						typeof message.content !== "string" &&
 						message.content.some((part) => part.type === "text" && part.text === "follow-up custom"),
 				);
-				return fauxAssistantMessage("done");
+				return workResponse("done");
 			},
 		]);
 
@@ -386,14 +387,19 @@ describe("AgentSession queue characterization", () => {
 						typeof message.content !== "string" &&
 						message.content.some((part) => part.type === "text" && part.text === "carry this"),
 				);
-				return fauxAssistantMessage("done");
+				return workResponse("done");
 			},
 		]);
 
 		await harness.session.prompt("normal prompt");
 
 		expect(sawCustomMessage).toBe(true);
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"user",
+			"custom",
+			"assistant",
+			"toolResult",
+		]);
 	});
 
 	it("updates pendingMessageCount and removes queued text before message_start is emitted", async () => {
@@ -404,7 +410,7 @@ describe("AgentSession queue characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		harness.session.subscribe((event) => {
@@ -478,7 +484,7 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 
-		harness.setResponses([fauxAssistantMessage("reply"), fauxAssistantMessage("follow-up reply")]);
+		harness.setResponses([workResponse("reply"), workResponse("follow-up reply")]);
 
 		await harness.session.prompt("hello");
 		await harness.session.agent.waitForIdle();
