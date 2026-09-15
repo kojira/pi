@@ -100,7 +100,7 @@ describe("explicit work completion", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(executions).toBe(1);
 		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
-		expect(payloads).toEqual([{ tool_choice: "auto" }, { tool_choice: "required" }, { tool_choice: "required" }]);
+		expect(payloads).toEqual([{ tool_choice: "auto" }, { tool_choice: "auto" }, { tool_choice: "auto" }]);
 		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
@@ -170,16 +170,19 @@ describe("explicit work completion", () => {
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
-	it("suspends instead of treating an ordinary text response as completion", async () => {
+	it("suspends after bounded correction instead of treating missing decisions as completion", async () => {
 		const harness = await createHarness({ explicitWorkCompletion: true });
 		harnesses.push(harness);
-		harness.setResponses([checkpoint(), fauxAssistantMessage("I will continue later.")]);
+		harness.setResponses([
+			checkpoint(),
+			...Array.from({ length: 3 }, () => fauxAssistantMessage("I will continue later.")),
+		]);
 		await harness.session.prompt("Implement and verify");
 		expect(harness.session.workContract).toMatchObject({
 			status: "suspended",
-			reason: expect.stringContaining("text-only"),
+			reason: expect.stringContaining("without an explicit finish"),
 		});
-		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.faux.state.callCount).toBe(4);
 		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
 	});
 

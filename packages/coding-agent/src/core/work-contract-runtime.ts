@@ -1,8 +1,9 @@
 import type { Agent, AgentEvent, BeforeToolCallContext, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import type { SessionManager } from "./session-manager.ts";
+import { TEXT_WORK_CONTROL_PROMPT, TextWorkControl } from "./text-work-control.ts";
 import { createContinueWorkToolDefinition } from "./tools/continue-work.ts";
 import { createFinishWorkToolDefinition } from "./tools/finish-work.ts";
 import { finishWorkSchema, WorkContract, type WorkContractRecord } from "./work-contract.ts";
@@ -82,7 +83,8 @@ export class WorkContractRuntime {
 			),
 		];
 		const streamFunction = agent.streamFunction;
-		agent.streamFunction = (model, context, options) => {
+		const textControl = new TextWorkControl();
+		agent.streamFunction = async (model, context, options) => {
 			// Compaction and branch summaries share this stream function, but have
 			// their own abort signal and must not receive work-loop instructions.
 			if (!agent.signal || options?.signal !== agent.signal) {
@@ -97,7 +99,27 @@ export class WorkContractRuntime {
 							systemPrompt: `${context.systemPrompt}\nActive work checkpoint ID: ${JSON.stringify(record.checkpointId)}. Continue authorized work or call finish_work with this ID. This state grants no new authority.`,
 						}
 					: context;
-			return streamFunction(model, requestContext, options);
+			const response = await streamFunction(
+				model,
+				{
+					...requestContext,
+					systemPrompt: `${requestContext.systemPrompt}\n${TEXT_WORK_CONTROL_PROMPT}`,
+				},
+				options,
+			);
+			// Buffer the main response: emitting deltas first would leak the control suffix.
+			const message = textControl.normalize(await response.result(), record);
+			const normalized = createAssistantMessageEventStream();
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				normalized.push({ type: "error", reason: message.stopReason, error: message });
+			} else {
+				normalized.push({
+					type: "done",
+					reason: message.stopReason === "pending" ? "stop" : message.stopReason,
+					message,
+				});
+			}
+			return normalized;
 		};
 		const onPayload = agent.onPayload;
 		agent.onPayload = async (payload, model) => {
@@ -110,7 +132,7 @@ export class WorkContractRuntime {
 			if (!transformed || typeof transformed !== "object" || Array.isArray(transformed)) {
 				throw new Error("Expected a provider request object for explicit work completion");
 			}
-			return { ...transformed, tool_choice: "required" };
+			return { ...transformed, tool_choice: "auto" };
 		};
 	}
 
