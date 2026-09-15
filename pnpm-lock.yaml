@@ -232,6 +232,9 @@ importers:
       '@types/semver':
         specifier: 7.7.1
         version: 7.7.1
+      openai:
+        specifier: 6.40.0
+        version: 6.40.0(ws@8.21.3)(zod@4.5.4)
       shx:
         specifier: 0.4.0
         version: 0.4.0
