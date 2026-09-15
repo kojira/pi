@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { type SessionEntry, sessionEntryToContextMessages } from "../../src/core/session-manager.ts";
 import type { ExtensionFactory } from "../../src/index.ts";
 import { createHarness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 function messageEntry(message: Record<string, unknown>): SessionEntry {
 	return {
@@ -44,14 +45,16 @@ describe("lax message content handling", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage(fauxToolCall("web_search", {}), { stopReason: "toolUse" }),
-				fauxAssistantMessage("done"),
+				workResponse("done"),
 			]);
 
 			await harness.session.prompt("search something");
 
-			const toolResults = harness.session.messages.filter((message) => message.role === "toolResult");
+			const toolResults = harness.session.messages.filter(
+				(message) => message.role === "toolResult" && message.toolName === "web_search",
+			);
 			expect(toolResults).toHaveLength(1);
-			expect(toolResults[0].content).toEqual([]);
+			expect(toolResults[0]).toMatchObject({ role: "toolResult", content: [] });
 			// The follow-up turn consumed the normalized tool result without crashing.
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {

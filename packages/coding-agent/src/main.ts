@@ -815,7 +815,6 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		const created = await createAgentSessionFromServices({
-			explicitWorkCompletion: parsed.explicitWorkCompletion,
 			services,
 			sessionManager,
 			sessionStartEvent,

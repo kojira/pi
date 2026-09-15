@@ -585,7 +585,7 @@ cat README.md | pi -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `read`, `bash`, `powershell` (Windows), `edit`, `write`, `grep`, `find`, `ls`, and the opt-in `continue_work` continuation checkpoint tool. See [continuation checkpoints](docs/continuation-checkpoints.md).
+Available work tools: `read`, `bash`, `powershell` (Windows), `edit`, `write`, `grep`, `find`, and `ls`. The runtime-owned `continue_work` and `finish_work` lifecycle controls are always available, independently of work-tool selection. See [continuation checkpoints](docs/continuation-checkpoints.md).
 
 ### Resource Options
 

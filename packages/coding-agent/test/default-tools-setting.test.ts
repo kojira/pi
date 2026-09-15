@@ -63,8 +63,8 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "continue_work", "edit", "find", "grep", "ls", "powershell", "read", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["grep", "find"]);
+		).toEqual(["bash", "continue_work", "edit", "find", "finish_work", "grep", "ls", "powershell", "read", "write"]);
+		expect(session.getActiveToolNames()).toEqual(["grep", "find", "continue_work", "finish_work"]);
 		expect(session.systemPrompt).toContain("- grep:");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
@@ -73,16 +73,23 @@ describe("defaultTools setting", () => {
 	it("can select powershell instead of bash", async () => {
 		const session = await createSession(["read", "powershell", "edit", "write"]);
 
-		expect(session.getActiveToolNames()).toEqual(["read", "powershell", "edit", "write"]);
+		expect(session.getActiveToolNames()).toEqual([
+			"read",
+			"powershell",
+			"edit",
+			"write",
+			"continue_work",
+			"finish_work",
+		]);
 		expect(session.systemPrompt).toContain("- powershell: Execute PowerShell commands");
 		expect(session.systemPrompt).not.toContain("- bash:");
 		session.dispose();
 	});
 
-	it("can opt in to continuation checkpoints", async () => {
+	it("keeps both lifecycle controls available without work tools", async () => {
 		const session = await createSession(["continue_work"]);
 
-		expect(session.getActiveToolNames()).toEqual(["continue_work"]);
+		expect(session.getActiveToolNames()).toEqual(["continue_work", "finish_work"]);
 		expect(session.systemPrompt).toContain("- continue_work:");
 		expect(session.systemPrompt).toContain("intermediate progress update");
 		expect(session.systemPrompt).toContain("waiting for user input");
@@ -126,7 +133,14 @@ describe("defaultTools setting", () => {
 		);
 		await session.bindExtensions({});
 
-		expect(session.getActiveToolNames().sort()).toEqual(["dynamic_tool", "grep", "sdk_tool", "static_tool"]);
+		expect(session.getActiveToolNames().sort()).toEqual([
+			"continue_work",
+			"dynamic_tool",
+			"finish_work",
+			"grep",
+			"sdk_tool",
+			"static_tool",
+		]);
 		expect(session.getAllTools().map((tool) => tool.name)).toEqual(
 			expect.arrayContaining(["read", "dynamic_tool", "sdk_tool", "static_tool"]),
 		);
@@ -135,16 +149,16 @@ describe("defaultTools setting", () => {
 
 	it("preserves explicit tool option precedence", async () => {
 		const allowlistedSession = await createSession(["grep"], { tools: ["read"] });
-		expect(allowlistedSession.getActiveToolNames()).toEqual(["read"]);
+		expect(allowlistedSession.getActiveToolNames()).toEqual(["read", "continue_work", "finish_work"]);
 		allowlistedSession.dispose();
 
 		const excludedSession = await createSession(["read", "grep"], { excludeTools: ["read"] });
-		expect(excludedSession.getActiveToolNames()).toEqual(["grep"]);
+		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "continue_work", "finish_work"]);
 		excludedSession.dispose();
 
 		const toolLessSession = await createSession(["read"], { noTools: "all" });
-		expect(toolLessSession.getAllTools()).toEqual([]);
-		expect(toolLessSession.getActiveToolNames()).toEqual([]);
+		expect(toolLessSession.getAllTools().map((tool) => tool.name)).toEqual(["continue_work", "finish_work"]);
+		expect(toolLessSession.getActiveToolNames()).toEqual(["continue_work", "finish_work"]);
 		toolLessSession.dispose();
 	});
 
@@ -162,8 +176,8 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "continue_work", "edit", "find", "grep", "ls", "powershell", "read", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["ls"]);
+		).toEqual(["bash", "continue_work", "edit", "find", "finish_work", "grep", "ls", "powershell", "read", "write"]);
+		expect(session.getActiveToolNames()).toEqual(["ls", "continue_work", "finish_work"]);
 		session.dispose();
 	});
 });

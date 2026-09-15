@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 function createEchoTool(): AgentTool {
 	return {
@@ -44,7 +45,7 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 			fauxAssistantMessage([fauxToolCall("echo", { text: "one" }), fauxToolCall("echo", { text: "two" })], {
 				stopReason: "toolUse",
 			}),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 		await harness.session.prompt("run tools");
 
@@ -58,6 +59,7 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 			"toolResult",
 			"toolResult",
 			"assistant",
+			"toolResult",
 		]);
 		const firstToolResultIndex = branchMessages.findIndex((message) => message.role === "toolResult");
 		expect(firstToolResultIndex).toBeGreaterThan(0);
@@ -71,7 +73,8 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 			tools: [createEchoTool()],
 			extensionFactories: [
 				(pi) => {
-					pi.on("tool_call", () => {
+					pi.on("tool_call", (event) => {
+						if (event.toolName !== "echo") return;
 						branchRolesAtToolCall.push(
 							harness.sessionManager
 								.getBranch()
@@ -85,7 +88,7 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		await harness.session.prompt("run tool");

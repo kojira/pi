@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import { createHarness, type Harness } from "./harness.ts";
+import { abortBufferedResponse, workResponse } from "./work-response.ts";
 
 function getEntryTypes(harness: Harness): string[] {
 	return harness.sessionManager.getEntries().map((entry) => entry.type);
@@ -211,7 +212,7 @@ describe("AgentSession bash and persistence characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		await harness.session.sendCustomMessage({
@@ -223,19 +224,22 @@ describe("AgentSession bash and persistence characterization", () => {
 		await harness.session.prompt("start");
 
 		const entries = harness.sessionManager.getEntries();
-		expect(entries.map((entry) => entry.type)).toEqual([
+		expect(entries.filter((entry) => entry.type !== "custom").map((entry) => entry.type)).toEqual([
 			"custom_message",
 			"message",
 			"message",
 			"message",
 			"message",
+			"message",
 		]);
+		expect(harness.session.workContract?.status).toBe("resolved");
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
 			"custom",
 			"user",
 			"assistant",
 			"toolResult",
 			"assistant",
+			"toolResult",
 		]);
 	});
 
@@ -262,23 +266,13 @@ describe("AgentSession bash and persistence characterization", () => {
 	it("persists aborted assistant messages", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("x".repeat(20_000))]);
+		await abortBufferedResponse(harness);
+		expect(harness.session.workContract?.status).toBe("suspended");
 
-		const sawMessageUpdate = new Promise<void>((resolve) => {
-			const unsubscribe = harness.session.subscribe((event) => {
-				if (event.type === "message_update") {
-					unsubscribe();
-					resolve();
-				}
-			});
-		});
-
-		const promptPromise = harness.session.prompt("hi");
-		await sawMessageUpdate;
-		await harness.session.abort();
-		await promptPromise;
-
-		const lastEntry = harness.sessionManager.getEntries()[harness.sessionManager.getEntries().length - 1];
+		const lastEntry = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message")
+			.at(-1);
 		expect(lastEntry?.type).toBe("message");
 		if (lastEntry?.type === "message") {
 			expect(lastEntry.message.role).toBe("assistant");

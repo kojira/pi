@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-work
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./harness.ts";
+import { abortBufferedResponse, workResponse } from "./work-response.ts";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
 	const normalized: string[] = [];
@@ -41,7 +42,7 @@ describe("AgentSession retry and event characterization", () => {
 
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
-			fauxAssistantMessage("recovered"),
+			workResponse("recovered"),
 		]);
 
 		await harness.session.prompt("test");
@@ -64,7 +65,7 @@ describe("AgentSession retry and event characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
-			fauxAssistantMessage("success"),
+			workResponse("success"),
 		]);
 
 		await harness.session.prompt("test");
@@ -112,7 +113,7 @@ describe("AgentSession retry and event characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
-			fauxAssistantMessage("recovered"),
+			workResponse("recovered"),
 		]);
 
 		await harness.session.prompt("test");
@@ -188,7 +189,8 @@ describe("AgentSession retry and event characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
-			fauxAssistantMessage("final answer"),
+			workResponse("final answer"),
+			workResponse("follow-up answer"),
 		]);
 
 		await harness.session.prompt("test");
@@ -220,7 +222,7 @@ describe("AgentSession retry and event characterization", () => {
 				order.push(`public:${event.type}:${event.message.role}`);
 			}
 		});
-		harness.setResponses([fauxAssistantMessage("done")]);
+		harness.setResponses([workResponse("done")]);
 
 		await harness.session.prompt("hi");
 
@@ -233,13 +235,17 @@ describe("AgentSession retry and event characterization", () => {
 			"public:message_start:assistant",
 			"extension:message_end:assistant",
 			"public:message_end:assistant",
+			"extension:message_start:toolResult",
+			"public:message_start:toolResult",
+			"extension:message_end:toolResult",
+			"public:message_end:toolResult",
 		]);
 	});
 
 	it("emits the expected event order for a single prompt", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("hello")]);
+		harness.setResponses([workResponse("hello")]);
 
 		await harness.session.prompt("hi");
 
@@ -248,9 +254,14 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_start",
 			"message_start:user",
 			"message_end:user",
+			"work_contract",
 			"message_start:assistant",
-			"message_update",
 			"message_end:assistant",
+			"tool_execution_start:finish_work",
+			"work_contract",
+			"tool_execution_end:finish_work",
+			"message_start:toolResult",
+			"message_end:toolResult",
 			"turn_end",
 			"agent_end",
 			"agent_settled",
@@ -274,7 +285,7 @@ describe("AgentSession retry and event characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
+			workResponse("done"),
 		]);
 
 		await harness.session.prompt("hi");
@@ -285,8 +296,8 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_start",
 			"message_start:user",
 			"message_end:user",
+			"work_contract",
 			"message_start:assistant",
-			"message_update",
 			"message_end:assistant",
 			"tool_execution_start:echo",
 			"tool_execution_end:echo",
@@ -295,15 +306,19 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_end",
 			"turn_start",
 			"message_start:assistant",
-			"message_update",
 			"message_end:assistant",
+			"tool_execution_start:finish_work",
+			"work_contract",
+			"tool_execution_end:finish_work",
+			"message_start:toolResult",
+			"message_end:toolResult",
 			"turn_end",
 			"agent_end",
 			"agent_settled",
 		]);
 	});
 
-	it("emits streaming deltas for text, thinking, and tool calls in message_update events", async () => {
+	it("buffers text, thinking, and tool calls until the main response is normalized", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([
@@ -317,10 +332,15 @@ describe("AgentSession retry and event characterization", () => {
 
 		await harness.session.prompt("hi").catch(() => {});
 
-		const updateTypes = harness.eventsOfType("message_update").map((event) => event.assistantMessageEvent.type);
-		expect(updateTypes).toContain("thinking_delta");
-		expect(updateTypes).toContain("text_delta");
-		expect(updateTypes).toContain("toolcall_delta");
+		expect(harness.eventsOfType("message_update")).toEqual([]);
+		const response = harness.eventsOfType("message_end").find((event) => event.message.role === "assistant");
+		expect(response?.message).toMatchObject({
+			content: [
+				{ type: "thinking", thinking: "plan" },
+				{ type: "text", text: "answer" },
+				{ type: "toolCall", name: "echo", arguments: { text: "hello" } },
+			],
+		});
 	});
 
 	it("emits agent_end for error responses", async () => {
@@ -337,21 +357,8 @@ describe("AgentSession retry and event characterization", () => {
 	it("emits agent_end for aborted runs and persists the aborted assistant message", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("x".repeat(20_000))]);
-
-		const sawMessageUpdate = new Promise<void>((resolve) => {
-			const unsubscribe = harness.session.subscribe((event) => {
-				if (event.type === "message_update") {
-					unsubscribe();
-					resolve();
-				}
-			});
-		});
-
-		const promptPromise = harness.session.prompt("hi");
-		await sawMessageUpdate;
-		await harness.session.abort();
-		await promptPromise;
+		await abortBufferedResponse(harness);
+		expect(harness.session.workContract?.status).toBe("suspended");
 
 		expect(harness.eventsOfType("agent_end")).toHaveLength(1);
 		expect(harness.events[harness.events.length - 1]?.type).toBe("agent_settled");

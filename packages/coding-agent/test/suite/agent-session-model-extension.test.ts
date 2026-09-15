@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BuildSystemPromptOptions, ExtensionAPI } from "../../src/index.ts";
 import { createHarness, getAssistantTexts, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 describe("AgentSession model and extension characterization", () => {
 	const harnesses: Harness[] = [];
@@ -309,6 +310,7 @@ describe("AgentSession model and extension characterization", () => {
 			extensionFactories: [
 				(pi) => {
 					pi.on("tool_result", async (event) => {
+						if (event.toolName !== "echo") return;
 						observedToolUsage = event.usage;
 						return {
 							content: [{ type: "text", text: "patched result" }],
@@ -331,7 +333,7 @@ describe("AgentSession model and extension characterization", () => {
 								.map((part) => part.text)
 								.join("\n")
 						: "";
-				return fauxAssistantMessage(text);
+				return workResponse(text);
 			},
 		]);
 

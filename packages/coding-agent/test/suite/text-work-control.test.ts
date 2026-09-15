@@ -20,7 +20,6 @@ describe("text work control", () => {
 	it("continues from text, executes work once, then finishes without another user message", async () => {
 		let executions = 0;
 		const harness = await createHarness({
-			explicitWorkCompletion: true,
 			tools: [
 				{
 					name: "verify",
@@ -56,7 +55,7 @@ describe("text work control", () => {
 	});
 
 	it("repairs a missing decision and resolves without silently stopping", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([next(), fauxAssistantMessage("Missing control"), done()]);
 		await harness.session.prompt("Verify");
@@ -65,7 +64,7 @@ describe("text work control", () => {
 	});
 
 	it("reconsiders finish when new input arrives before executing its normalized operation", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
 		let queued = false;
 		harness.session.subscribe((event) => {
@@ -86,12 +85,13 @@ describe("text work control", () => {
 		expect(harness.session.workContract?.status).toBe("resolved");
 	});
 
-	it("preserves text verbatim with the mode disabled", async () => {
+	it("requires no mode or initial checkpoint to finish a simple response", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
-		harness.setResponses([next()]);
+		harness.setResponses([done()]);
 		await harness.session.prompt("Verify");
 		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.session.getLastAssistantText()).toContain("<work-control>");
+		expect(harness.session.getLastAssistantText()).toBe("Verified.");
+		expect(harness.session.workContract?.status).toBe("resolved");
 	});
 });

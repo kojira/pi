@@ -40,8 +40,9 @@ export class TextWorkControl {
 			delete lastText.textSignature;
 		}
 		const result = { ...message, content };
-		if (message.stopReason === "error" || message.stopReason === "aborted") return hasSuffix ? result : message;
-		if (!hasSuffix && (record?.status !== "active" || content.some((block) => block.type === "toolCall"))) {
+		if (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length")
+			return hasSuffix ? result : message;
+		if (!hasSuffix && content.some((block) => block.type === "toolCall")) {
 			this.repairs = 0;
 			return message;
 		}
@@ -49,7 +50,7 @@ export class TextWorkControl {
 			return { ...result, stopReason: "error", errorMessage: "Work control cannot be mixed with tool calls" };
 		}
 		let decision: unknown;
-		if (hasMarker && message.stopReason !== "length") {
+		if (hasMarker) {
 			try {
 				decision = JSON.parse(marker[1]);
 			} catch {

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
@@ -14,6 +14,7 @@ import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ModelRuntime } from "../../../src/core/model-runtime.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
+import { workResponse } from "../work-response.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -43,7 +44,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		const faux = registerFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
-		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
+		faux.setResponses(responses.map(workResponse));
 
 		const authStorage = AuthStorage.inMemory();
 		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
@@ -204,6 +205,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:Hello from the new session!",
 			"assistant:hello reply",
+			"toolResult:hello reply",
 		]);
 	});
 
@@ -235,8 +237,10 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:seed",
 			"assistant:seed reply",
+			"toolResult:seed reply",
 			"user:fork callback message",
 			"assistant:fork reply",
+			"toolResult:fork reply",
 		]);
 	});
 
@@ -272,8 +276,10 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:target",
 			"assistant:target reply",
+			"toolResult:target reply",
 			"user:switch callback message",
 			"assistant:switch reply",
+			"toolResult:switch reply",
 		]);
 	});
 });

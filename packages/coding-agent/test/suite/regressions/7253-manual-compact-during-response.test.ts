@@ -34,7 +34,7 @@ describe("issue #7253: manual compaction during an active response", () => {
 		});
 
 		const harness = await createHarness({
-			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 1000 }],
+			models: [{ id: "faux-1", contextWindow: 4000, maxTokens: 1000 }],
 			settings: { compaction: { enabled: true, reserveTokens: 200, keepRecentTokens: 2 } },
 			tools: [createNoopTool()],
 			extensionFactories: [
@@ -56,7 +56,7 @@ describe("issue #7253: manual compaction during an active response", () => {
 			async () => {
 				markSecondResponseStarted();
 				await secondResponseReleased;
-				return fauxAssistantMessage(`second response:${"x".repeat(4000)}`);
+				return fauxAssistantMessage(`second response:${"x".repeat(16000)}`);
 			},
 		]);
 

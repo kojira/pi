@@ -50,7 +50,8 @@ describe("text control normalization", () => {
 			fauxAssistantMessage(`Report\n${footer}`, { stopReason: "length" }),
 			active,
 		);
-		expect(message.content.at(-1)).toMatchObject({ name: "continue_work" });
+		expect(message.stopReason).toBe("length");
+		expect(message.content).toEqual([{ type: "text", text: "Report" }]);
 	});
 
 	it.each(["error", "aborted"] as const)("does not turn %s into continued work", (stopReason) => {

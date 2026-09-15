@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, type Harness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 describe("issue #3317 network connection lost retry", () => {
 	const harnesses: Harness[] = [];
@@ -18,7 +19,7 @@ describe("issue #3317 network connection lost retry", () => {
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Network connection lost." }),
-			fauxAssistantMessage("recovered after reconnect"),
+			workResponse("recovered after reconnect"),
 		]);
 
 		await harness.session.prompt("test");

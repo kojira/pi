@@ -427,7 +427,9 @@ export function findCutPoint(
 
 		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {
-			// Find the closest valid cut point at or after this entry
+			// If the tail is a tool result, retain its assistant call rather than all history.
+			cutIndex = cutPoints[cutPoints.length - 1];
+			// Find the closest valid cut point at or after this entry.
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
 					cutIndex = cutPoints[c];

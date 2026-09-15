@@ -28,7 +28,6 @@ describe("explicit work completion", () => {
 		let harness: Harness;
 		let summaryPrompt: string | undefined;
 		harness = await createHarness({
-			explicitWorkCompletion: true,
 			tools: [
 				{
 					name: "summarize",
@@ -68,7 +67,6 @@ describe("explicit work completion", () => {
 	it("resolves only through finish_work without an extra assistant request or synthetic user", async () => {
 		let executions = 0;
 		const harness = await createHarness({
-			explicitWorkCompletion: true,
 			tools: [
 				{
 					name: "verify",
@@ -83,13 +81,6 @@ describe("explicit work completion", () => {
 			],
 		});
 		harnesses.push(harness);
-		const payloads: unknown[] = [];
-		const onPayload = harness.session.agent.onPayload!;
-		harness.session.agent.onPayload = async (payload, model) => {
-			const result = await onPayload(payload, model);
-			payloads.push(result);
-			return result;
-		};
 		harness.setResponses([
 			checkpoint(),
 			fauxAssistantMessage(fauxToolCall("verify", {}), { stopReason: "toolUse" }),
@@ -100,13 +91,12 @@ describe("explicit work completion", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(executions).toBe(1);
 		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
-		expect(payloads).toEqual([{ tool_choice: "auto" }, { tool_choice: "auto" }, { tool_choice: "auto" }]);
 		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
 	it("preserves a finish summary across context-only messages, but not a later assistant response", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.session.subscribe((event) => {
 			if (
@@ -124,31 +114,44 @@ describe("explicit work completion", () => {
 		await harness.session.prompt("Verify");
 		expect(harness.session.messages.at(-1)?.role).toBe("custom");
 		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
-		harness.setResponses([fauxAssistantMessage("Answer to new input")]);
+		harness.setResponses([
+			fauxAssistantMessage(
+				'Answer to new input\n<work-control>{"action":"finish","outcome":"completed","reason":"Answered"}</work-control>',
+			),
+		]);
 		await harness.session.prompt("A new question");
 		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");
 	});
 
 	it("processes follow-up input queued after a successful finish", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
+		let queued = false;
 		harness.session.subscribe((event) => {
 			if (
+				!queued &&
 				event.type === "message_end" &&
 				event.message.role === "toolResult" &&
 				event.message.toolName === "finish_work"
 			) {
+				queued = true;
 				void harness.session.followUp("A new question");
 			}
 		});
-		harness.setResponses([checkpoint(), finish(), fauxAssistantMessage("Answer to new input")]);
+		harness.setResponses([
+			checkpoint(),
+			finish(),
+			fauxAssistantMessage(
+				'Answer to new input\n<work-control>{"action":"finish","outcome":"completed","reason":"Answered"}</work-control>',
+			),
+		]);
 		await harness.session.prompt("Verify");
 		expect(getUserTexts(harness)).toEqual(["Verify", "A new question"]);
 		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");
 	});
 
 	it("suspends an aborted checkpoint without replaying it", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.session.subscribe((event) => {
 			if (
@@ -171,7 +174,7 @@ describe("explicit work completion", () => {
 	});
 
 	it("suspends after bounded correction instead of treating missing decisions as completion", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([
 			checkpoint(),
@@ -187,7 +190,7 @@ describe("explicit work completion", () => {
 	});
 
 	it("rejects a finish raced by follow-up input and processes that input before resolving", async () => {
-		const harness = await createHarness({ explicitWorkCompletion: true });
+		const harness = await createHarness({});
 		harnesses.push(harness);
 		let queued = false;
 		harness.session.subscribe((event) => {

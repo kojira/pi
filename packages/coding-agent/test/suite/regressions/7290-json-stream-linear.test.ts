@@ -1,7 +1,7 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { toJsonEvent } from "../../../src/modes/json-event.ts";
 import { createHarness, type Harness } from "../harness.ts";
+import { workResponse } from "../work-response.ts";
 
 describe("regression #7290: JSON event streams stay linear", () => {
 	const harnesses: Harness[] = [];
@@ -15,26 +15,18 @@ describe("regression #7290: JSON event streams stay linear", () => {
 	async function measureUpdateBytes(text: string): Promise<number> {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage(text)]);
+		harness.setResponses([workResponse(text)]);
 
 		await harness.session.prompt("respond");
 
-		const sessionUpdates = harness.eventsOfType("message_update");
-		for (const update of sessionUpdates) {
-			expect(update).toHaveProperty("message");
-			expect(update.assistantMessageEvent).toHaveProperty("partial");
-		}
-
-		const updates = sessionUpdates.map((event) => toJsonEvent(event));
-		expect(updates.length).toBeGreaterThan(0);
-		for (const update of updates) {
-			expect(update).not.toHaveProperty("message");
-			expect(update.assistantMessageEvent).not.toHaveProperty("partial");
-		}
-		return updates.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event)), 0);
+		expect(harness.eventsOfType("message_update")).toEqual([]);
+		expect(harness.session.getLastAssistantText()).toBe(text);
+		const events = harness.events.map((event) => toJsonEvent(event));
+		expect(JSON.stringify(events)).not.toContain("<work-control>");
+		return events.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event)), 0);
 	}
 
-	it("emits delta-only message updates whose size scales linearly", async () => {
+	it("emits buffered normalized responses whose total wire size scales linearly", async () => {
 		const smallBytes = await measureUpdateBytes("x".repeat(2_000));
 		const largeBytes = await measureUpdateBytes("x".repeat(4_000));
 

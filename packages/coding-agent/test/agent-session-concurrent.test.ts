@@ -97,7 +97,11 @@ describe("AgentSession concurrent prompt guard", () => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" },
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -369,7 +373,12 @@ describe("AgentSession concurrent prompt guard", () => {
 					if (toolResultCount > 0) {
 						const message: AssistantMessage = {
 							role: "assistant",
-							content: [{ type: "text", text: "done" }],
+							content: [
+								{
+									type: "text",
+									text: 'done\n<work-control>{"action":"finish","outcome":"completed","reason":"Done"}</work-control>',
+								},
+							],
 							api: "anthropic-messages",
 							provider: "anthropic",
 							model: "mock",
@@ -459,7 +468,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			hasHandlers: (eventType) => eventType === "tool_call",
 			emit: async () => {},
 			emitMessageEnd: async () => undefined,
-			emitToolCall: async () => {
+			emitToolCall: async (event) => {
+				if (!event.toolCallId.startsWith("toolu_")) return undefined;
 				snapshots.push(
 					sessionManager
 						.getEntries()
@@ -516,7 +526,12 @@ describe("AgentSession concurrent prompt guard", () => {
 					if (hasToolResult) {
 						const message: AssistantMessage = {
 							role: "assistant",
-							content: [{ type: "text", text: "done" }],
+							content: [
+								{
+									type: "text",
+									text: 'done\n<work-control>{"action":"finish","outcome":"completed","reason":"Done"}</work-control>',
+								},
+							],
 							api: "anthropic-messages",
 							provider: "anthropic",
 							model: "mock",
@@ -624,6 +639,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			"assistant",
 			"toolResult",
 			"assistant",
+			"toolResult",
 		]);
 	});
 });
