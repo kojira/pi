@@ -219,14 +219,22 @@ describe("AgentSession concurrent prompt guard", () => {
 					if (userTexts.includes("Steer from extension")) {
 						sawSteeringMessage = true;
 						stream.push({ type: "start", partial: createAssistantMessage("") });
-						stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Steered") });
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage('Steered\n<done reason="Steering handled"/>'),
+						});
 						return;
 					}
 
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					const checkAbort = () => {
 						if (abortSignal?.aborted) {
-							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" },
+							});
 						} else {
 							setTimeout(checkAbort, 5);
 						}
@@ -292,7 +300,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
-		expect(sawSteeringMessage).toBe(true);
+		// Cancellation must not start another inference merely to consume queued steering.
+		expect(sawSteeringMessage).toBe(false);
 	});
 
 	it("should allow prompt() after previous completes", async () => {
@@ -309,7 +318,11 @@ describe("AgentSession concurrent prompt guard", () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage('Done\n<done reason="Answered"/>'),
+					});
 				});
 				return stream;
 			},
@@ -376,7 +389,7 @@ describe("AgentSession concurrent prompt guard", () => {
 							content: [
 								{
 									type: "text",
-									text: 'done\n<work-control>{"action":"finish","outcome":"completed","reason":"Done"}</work-control>',
+									text: 'done\n<done reason="Done"/>',
 								},
 							],
 							api: "anthropic-messages",
@@ -529,7 +542,7 @@ describe("AgentSession concurrent prompt guard", () => {
 							content: [
 								{
 									type: "text",
-									text: 'done\n<work-control>{"action":"finish","outcome":"completed","reason":"Done"}</work-control>',
+									text: 'done\n<done reason="Done"/>',
 								},
 							],
 							api: "anthropic-messages",

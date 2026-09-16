@@ -3,9 +3,7 @@ import type { Harness } from "./harness.ts";
 
 /** Explicitly compliant final response fixture; do not use for summaries or protocol-error tests. */
 export function workResponse(text: string) {
-	return fauxAssistantMessage(
-		`${text}\n<work-control>{"action":"finish","outcome":"completed","reason":"Fixture work complete"}</work-control>`,
-	);
+	return fauxAssistantMessage(`${text}\n<done reason="Fixture work complete"/>`);
 }
 
 /** Abort while the provider is active, independently of public output buffering. */

@@ -94,9 +94,7 @@ describe("AgentSession retry", () => {
 						stream.push({ type: "start", partial: msg });
 						stream.push({ type: "error", reason: "error", error: msg });
 					} else {
-						const msg = createAssistantMessage(
-							'Success\n<work-control>{"action":"finish","outcome":"completed","reason":"Recovered"}</work-control>',
-						);
+						const msg = createAssistantMessage('Success\n<done reason="Recovered"/>');
 						stream.push({ type: "start", partial: msg });
 						stream.push({ type: "done", reason: "stop", message: msg });
 					}
@@ -193,9 +191,7 @@ describe("AgentSession retry", () => {
 					return;
 				}
 
-				const msg = createAssistantMessage(
-					'Recovered after retry\n<work-control>{"action":"finish","outcome":"completed","reason":"Recovered"}</work-control>',
-				);
+				const msg = createAssistantMessage('Recovered after retry\n<done reason="Recovered"/>');
 				stream.push({ type: "start", partial: msg });
 				stream.push({ type: "done", reason: "stop", message: msg });
 			});
@@ -285,9 +281,7 @@ describe("AgentSession retry", () => {
 						stream.push({ type: "done", reason: "toolUse", message: msg });
 					} else {
 						// Third call (after tool result): final response
-						const msg = createAssistantMessage(
-							'Final answer.\n<work-control>{"action":"finish","outcome":"completed","reason":"Answered"}</work-control>',
-						);
+						const msg = createAssistantMessage('Final answer.\n<done reason="Answered"/>');
 						stream.push({ type: "start", partial: msg });
 						stream.push({ type: "done", reason: "stop", message: msg });
 					}

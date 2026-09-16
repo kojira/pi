@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, createHarnessWithExtensions, type Harness } from "./test-harness.ts";
 
 function final(text: string): string {
-	return `${text}\n<work-control>{"action":"finish","outcome":"completed","reason":"Fixture complete"}</work-control>`;
+	return `${text}\n<done reason="Fixture complete"/>`;
 }
 
 describe("test harness", () => {
@@ -187,7 +187,7 @@ describe("test harness", () => {
 
 		expect(harness.eventsOfType("message_update")).toEqual([]);
 		expect(harness.session.getLastAssistantText()).toBe("hello world");
-		expect(JSON.stringify(harness.events)).not.toContain("<work-control>");
+		expect(JSON.stringify(harness.events)).not.toContain("<done");
 	});
 
 	it("preserves thinking in buffered responses", async () => {

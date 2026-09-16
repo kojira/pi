@@ -222,6 +222,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 
+	/** Continue inference after a text turn without injecting a message or tool call.
+	 * Runs after queued input is drained. Abort and shouldStopAfterTurn take precedence.
+	 */
+	shouldContinueAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+
 	/**
 	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.
 	 * Return replacement context/model/thinking state to affect that turn.

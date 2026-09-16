@@ -114,11 +114,7 @@ describe("explicit work completion", () => {
 		await harness.session.prompt("Verify");
 		expect(harness.session.messages.at(-1)?.role).toBe("custom");
 		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
-		harness.setResponses([
-			fauxAssistantMessage(
-				'Answer to new input\n<work-control>{"action":"finish","outcome":"completed","reason":"Answered"}</work-control>',
-			),
-		]);
+		harness.setResponses([fauxAssistantMessage('Answer to new input\n<done reason="Answered"/>')]);
 		await harness.session.prompt("A new question");
 		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");
 	});
@@ -141,9 +137,7 @@ describe("explicit work completion", () => {
 		harness.setResponses([
 			checkpoint(),
 			finish(),
-			fauxAssistantMessage(
-				'Answer to new input\n<work-control>{"action":"finish","outcome":"completed","reason":"Answered"}</work-control>',
-			),
+			fauxAssistantMessage('Answer to new input\n<done reason="Answered"/>'),
 		]);
 		await harness.session.prompt("Verify");
 		expect(getUserTexts(harness)).toEqual(["Verify", "A new question"]);
@@ -173,19 +167,17 @@ describe("explicit work completion", () => {
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
-	it("suspends after bounded correction instead of treating missing decisions as completion", async () => {
+	it("continues ordinary text turns without correction until explicitly finished", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([
 			checkpoint(),
 			...Array.from({ length: 3 }, () => fauxAssistantMessage("I will continue later.")),
+			finish(),
 		]);
 		await harness.session.prompt("Implement and verify");
-		expect(harness.session.workContract).toMatchObject({
-			status: "suspended",
-			reason: expect.stringContaining("without an explicit finish"),
-		});
-		expect(harness.faux.state.callCount).toBe(4);
+		expect(harness.session.workContract?.status).toBe("resolved");
+		expect(harness.faux.state.callCount).toBe(5);
 		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
 	});
 

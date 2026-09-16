@@ -249,7 +249,11 @@ async function runLoop(
 				newMessages,
 			};
 
-			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {
+			if (signal?.aborted || (await config.shouldStopAfterTurn?.(lastCompletedTurn))) {
+				if (signal?.aborted) {
+					message.stopReason = "aborted";
+					message.errorMessage = "Operation aborted";
+				}
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -262,6 +266,11 @@ async function runLoop(
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
+			continue;
+		}
+
+		// The owner may keep a text-only turn active without fabricating input or tool calls.
+		if (!signal?.aborted && lastCompletedTurn && (await config.shouldContinueAfterTurn?.(lastCompletedTurn))) {
 			continue;
 		}
 

@@ -83,6 +83,8 @@ export class WorkContractRuntime {
 				}),
 			),
 		];
+		agent.shouldContinueAfterTurn = ({ message }, signal) =>
+			!signal?.aborted && this.contract.active && message.stopReason === "stop";
 		const streamFunction = agent.streamFunction;
 		this.originalStreamFunction = streamFunction;
 		const textControl = new TextWorkControl();
@@ -158,14 +160,6 @@ export class WorkContractRuntime {
 		const message = event.message;
 		if (message.stopReason === "aborted") {
 			this.contract.suspend("Agent aborted");
-		} else if (
-			message.stopReason !== "error" &&
-			message.stopReason !== "length" &&
-			!message.content.some((block) => block.type === "toolCall")
-		) {
-			message.stopReason = "error";
-			message.errorMessage = "Active work contract received a text-only response instead of a required tool call";
-			this.contract.suspend(message.errorMessage);
 		}
 	}
 }

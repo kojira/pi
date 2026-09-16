@@ -1,28 +1,20 @@
-## What happened?
+# Text work control — approved design v4
 
-Explicit work completion forces tool calls and suspends active work on a text-only response. A progress report therefore cannot itself select another model turn.
+Every main response uses one lifecycle. The only text control is a standalone final line:
 
-## Steps to reproduce
+```text
+Verification passed.
+<done reason="Verification passed"/>
+```
 
-Enable explicit work completion, create a checkpoint, then return a text-only progress report. The runtime marks it as a protocol error and suspends the contract. This behavior is in core, independently of extensions.
+The reason must be nonempty. Use `&quot;` for embedded quotes and `&amp;` for ampersands. A marker in a code fence or quotation is literal, not a decision.
 
-## Expected behavior / design v3
+Without a valid done marker, Pi continues inference with the existing transcript. There is no continuation marker, JSON control payload, format-correction prompt, synthetic continue tool, synthetic user input, repair counter or repair-limit error. Old work-control markers have no control meaning. Normal progress text remains visible. Auxiliary compaction and branch summaries are not main work turns.
 
-Support a terminal `<work-control>` JSON line as an alternative representation of existing work-control operations:
+A valid marker is stripped before delivery and normalized to the existing finish operation with its reason, current checkpoint ID and visible text as summary (or the reason when there is no visible text). Explicit work tools remain available. Tool allowlists still restrict actual work tools. Markers mixed with tool calls are rejected before execution.
 
-- `{"action":"continue","nextAction":"Run the focused tests"}`
-- `{"action":"finish","outcome":"completed","reason":"Tests passed"}`
+The low-level agent loop checks whether its owner needs another inference at the text boundary, after queued input, without replaying tools or ending and relaunching the session. Pi always binds this to the active work contract; there is no user-selectable mode. Abort, provider failures, output truncation and existing retry/compaction recovery remain distinct from normal continuation. New input invalidates stale finish decisions.
 
-Normalize the explicit model decision into the existing checkpoint/finish lifecycle before output delivery. The preceding visible text is the finish summary. Require nonempty nextAction/reason and a valid outcome; do not infer task completion from prose. Keep stale-input protection, abort/error semantics and single-owner continuation. Tool allowlists constrain work tools; the two runtime-owned lifecycle controls remain available even when work tools are disabled. No extra classifier model, Gateway reinvocation, synthetic user message or tool replay.
+This does not guarantee correct model judgment: a model may still finish prematurely or continue unnecessarily. If it never finishes, normal continuation has no format-repair cap; the operator can cancel. Main responses remain buffered to hide terminal markers.
 
-Use this single lifecycle for every main assistant response, starting a checkpoint automatically at the first request. Remove the CLI/SDK opt-in and provider-specific restriction; there is no legacy prose-ends-work mode. Buffer main assistant responses until normalization, so terminal control bytes do not leak through streaming events. Auxiliary summaries are not work turns and remain unchanged. Text-only active responses missing a valid footer get two protocol-correction turns via the existing checkpoint mechanism, then an explicit suspension error (not successful completion). Valid tool calls remain supported; footer decisions mixed with tool calls are rejected rather than ambiguously executed.
-
-Validation: offline full loop (text continue -> work -> text finish), first-response completion without configuration, provider transcript serialization, hidden footer in events/output, missing/invalid/fenced/truncated controls, input racing finish, abort, compaction and restoration. Truncated output retains its interruption status and existing bounded compaction recovery; it cannot execute a finish decision. Terminating tool boundaries defer compaction until the next input. PR and reviews only; no merge or deployment.
-
-Local validation of this revision passes: 2,219 coding-agent tests (50 skipped), including queue, compaction, event ordering, interruption and output projection; static checks also pass. Earlier successful CI covered the opt-in implementation, not this revision. Fresh CI and final review are still required.
-
-## Design self-review
-
-Using a structured payload avoids falsely mapping every stop to successful completion and preserves a concrete nextAction. Existing tool-result boundaries avoid a new low-level loop or replaying completed side effects. Generated function calls omit provider-owned item IDs; serialization must verify matching call/result IDs. Buffering is an explicit latency and streaming-API tradeoff for main responses, not a selectable mode. Independent review has not been performed.
-
-AI-generated.
+Validation targets: consecutive text-only inference without extra messages or tool calls, tools followed by completion, no legacy marker compatibility, literal/malformed markers, reason escaping, stale input, abort, provider errors, compaction and single delivery of the final summary. Deterministic tests must be distinguished from live provider and transport acceptance. No production cutover is part of implementation approval.

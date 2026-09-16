@@ -65,9 +65,11 @@ describe("lax message content handling", () => {
 	it("normalizes null content in message_end extension replacements", async () => {
 		const extensionFactories: ExtensionFactory[] = [
 			(pi) => {
+				let replaced = false;
 				pi.on("message_end", async (event) => {
-					if (event.message.role !== "assistant") return undefined;
-					// Simulate an untyped JS extension replacing a message without content.
+					if (event.message.role !== "assistant" || replaced) return undefined;
+					replaced = true;
+					// Simulate an untyped JS extension replacing a progress message without content.
 					return { message: { ...event.message, content: null } as unknown as AgentMessage };
 				});
 			},
@@ -75,12 +77,13 @@ describe("lax message content handling", () => {
 		const harness = await createHarness({ extensionFactories });
 
 		try {
-			harness.setResponses([fauxAssistantMessage("hello")]);
+			harness.setResponses([fauxAssistantMessage("hello"), workResponse("done")]);
 			await harness.session.prompt("hi");
 
 			const assistantMessages = harness.session.messages.filter((message) => message.role === "assistant");
-			expect(assistantMessages).toHaveLength(1);
+			expect(assistantMessages).toHaveLength(2);
 			expect(assistantMessages[0].content).toEqual([]);
+			expect(harness.session.workContract?.status).toBe("resolved");
 		} finally {
 			harness.cleanup();
 		}
