@@ -207,6 +207,12 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	private _lastRunAborted = false;
+
+	/** Cancellation state of the settled run, independent of its completed transcript. */
+	get lastRunAborted(): boolean {
+		return this._lastRunAborted;
+	}
 	private _inputVersion = 0;
 
 	/** Monotonic acceptance version, including messages not yet delivered to the model. */
@@ -372,7 +378,7 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	/** Continue from the transcript. An owner-provided continuation hook also permits assistant text tails. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
@@ -396,7 +402,7 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			if (!this.shouldContinueAfterTurn) throw new Error("Cannot continue from message role: assistant");
 		}
 
 		await this.runContinuation();
@@ -512,6 +518,7 @@ export class Agent {
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
+		this._lastRunAborted = false;
 		this.activeRun = { promise, resolve: resolvePromise, abortController };
 
 		this._state.isStreaming = true;
@@ -546,6 +553,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this._lastRunAborted = this.activeRun?.abortController.signal.aborted === true;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();

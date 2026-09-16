@@ -1193,6 +1193,8 @@ export class AgentSession {
 		this._pendingInLoopCompactionSignal = undefined;
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
+		// Cancellation is run state, not a mutation of an already-persisted assistant message.
+		if (this.agent.lastRunAborted) return false;
 		if (!msg) {
 			return resumeAfterInLoopCompaction;
 		}

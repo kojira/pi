@@ -116,6 +116,21 @@ describe("text work control", () => {
 		expect(harness.session.workContract?.status).toBe("resolved");
 	});
 
+	it("retries a transient provider error after ordinary progress without synthetic input", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			next(),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			done(),
+		]);
+		await harness.session.prompt("Verify");
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(getUserTexts(harness)).toEqual(["Verify"]);
+		expect(harness.session.workContract?.status).toBe("resolved");
+		expect(harness.eventsOfType("tool_execution_start").map((event) => event.toolName)).toEqual(["finish_work"]);
+	});
+
 	it("does not continue a provider error as ordinary text", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
