@@ -58,9 +58,9 @@ export function agentLoop(
  * Continue an agent loop from the current context without adding a new message.
  * Used for retries - context already has user message or tool results.
  *
- * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * The last message normally must convert to a `user` or `toolResult` message.
+ * Owners installing `shouldContinueAfterTurn` also support assistant text boundaries,
+ * including retry after a text-only turn. Their provider must accept that context.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -72,7 +72,7 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
+	if (context.messages[context.messages.length - 1].role === "assistant" && !config.shouldContinueAfterTurn) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -129,7 +129,7 @@ export async function runAgentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
+	if (context.messages[context.messages.length - 1].role === "assistant" && !config.shouldContinueAfterTurn) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -249,7 +249,7 @@ async function runLoop(
 				newMessages,
 			};
 
-			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {
+			if (signal?.aborted || (await config.shouldStopAfterTurn?.(lastCompletedTurn))) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -263,6 +263,11 @@ async function runLoop(
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
 			continue;
+		}
+
+		// The owner may keep a text-only turn active without fabricating input or tool calls.
+		if (!signal?.aborted && lastCompletedTurn && (await config.shouldContinueAfterTurn?.(lastCompletedTurn))) {
+			if (!signal?.aborted) continue;
 		}
 
 		// No more messages, exit

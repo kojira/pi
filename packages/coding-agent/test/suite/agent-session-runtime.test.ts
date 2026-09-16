@@ -51,7 +51,9 @@ describe("AgentSessionRuntime characterization", () => {
 				{ id: "faux-2", reasoning: false },
 			],
 		});
-		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
+		faux.setResponses(
+			["one", "two", "three"].map((text) => fauxAssistantMessage(`${text}\n<done reason="Answered"/>`)),
+		);
 
 		const authStorage = AuthStorage.inMemory();
 		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
@@ -204,12 +206,8 @@ describe("AgentSessionRuntime characterization", () => {
 		const outgoingEntries = SessionManager.open(outgoingSession.sessionFile!)
 			.getEntries()
 			.filter((entry) => entry.type === "message");
-		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual([
-			"user",
-			"assistant",
-			"toolResult",
-			"assistant",
-		]);
+		// Cancellation settles the tool result without starting an extra aborted inference.
+		expect(outgoingEntries.map((entry) => entry.message.role)).toEqual(["user", "assistant", "toolResult"]);
 	});
 
 	it("preserves an existing session when importing a file with the same name", async () => {
@@ -437,7 +435,9 @@ describe("AgentSessionRuntime characterization", () => {
 				{ id: "faux-2", reasoning: false },
 			],
 		});
-		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
+		faux.setResponses(
+			["one", "two", "three"].map((text) => fauxAssistantMessage(`${text}\n<done reason="Answered"/>`)),
+		);
 
 		const authStorage = AuthStorage.inMemory();
 		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));

@@ -106,6 +106,7 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
+	shouldContinueAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -194,6 +195,10 @@ export class Agent {
 		context: ShouldStopAfterTurnContext,
 		signal?: AbortSignal,
 	) => boolean | Promise<boolean>;
+	public shouldContinueAfterTurn?: (
+		context: ShouldStopAfterTurnContext,
+		signal?: AbortSignal,
+	) => boolean | Promise<boolean>;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -202,6 +207,12 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	private _lastRunAborted = false;
+
+	/** Cancellation state of the settled run, independent of its completed transcript. */
+	get lastRunAborted(): boolean {
+		return this._lastRunAborted;
+	}
 	private _inputVersion = 0;
 
 	/** Monotonic acceptance version, including messages not yet delivered to the model. */
@@ -232,6 +243,7 @@ export class Agent {
 		this.beforeToolCall = runtimeOptions.beforeToolCall;
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.shouldStopAfterTurn = runtimeOptions.shouldStopAfterTurn;
+		this.shouldContinueAfterTurn = runtimeOptions.shouldContinueAfterTurn;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -366,7 +378,7 @@ export class Agent {
 		await this.runPromptMessages(messages);
 	}
 
-	/** Continue from the current transcript. The last message must be a user or tool-result message. */
+	/** Continue from the transcript. An owner-provided continuation hook also permits assistant text tails. */
 	async continue(): Promise<void> {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
@@ -390,7 +402,7 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			if (!this.shouldContinueAfterTurn) throw new Error("Cannot continue from message role: assistant");
 		}
 
 		await this.runContinuation();
@@ -454,6 +466,7 @@ export class Agent {
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		const shouldStopAfterTurn = this.shouldStopAfterTurn;
+		const shouldContinueAfterTurn = this.shouldContinueAfterTurn;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -468,6 +481,9 @@ export class Agent {
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: shouldStopAfterTurn
 				? async (context) => await shouldStopAfterTurn(context, this.signal)
+				: undefined,
+			shouldContinueAfterTurn: shouldContinueAfterTurn
+				? async (context) => await shouldContinueAfterTurn(context, this.signal)
 				: undefined,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
@@ -502,6 +518,7 @@ export class Agent {
 		const promise = new Promise<void>((resolve) => {
 			resolvePromise = resolve;
 		});
+		this._lastRunAborted = false;
 		this.activeRun = { promise, resolve: resolvePromise, abortController };
 
 		this._state.isStreaming = true;
@@ -536,6 +553,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this._lastRunAborted = this.activeRun?.abortController.signal.aborted === true;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();

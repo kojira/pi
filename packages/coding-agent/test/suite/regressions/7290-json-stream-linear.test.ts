@@ -22,7 +22,7 @@ describe("regression #7290: JSON event streams stay linear", () => {
 		expect(harness.eventsOfType("message_update")).toEqual([]);
 		expect(harness.session.getLastAssistantText()).toBe(text);
 		const events = harness.events.map((event) => toJsonEvent(event));
-		expect(JSON.stringify(events)).not.toContain("<work-control>");
+		expect(JSON.stringify(events)).not.toContain("<done");
 		return events.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event)), 0);
 	}
 
