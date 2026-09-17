@@ -56,14 +56,24 @@ describe("extension active tools next-turn refresh", () => {
 				},
 			]);
 
-			expect(harness.session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work", "switch_tools"]);
+			expect(harness.session.getActiveToolNames().sort()).toEqual([
+				"continue_work",
+				"finish_work",
+				"switch_tools",
+				"wait_for_user",
+			]);
 
 			await harness.session.prompt("start");
 
-			expect(harness.session.getActiveToolNames().sort()).toEqual(["after_switch", "continue_work", "finish_work"]);
+			expect(harness.session.getActiveToolNames().sort()).toEqual([
+				"after_switch",
+				"continue_work",
+				"finish_work",
+				"wait_for_user",
+			]);
 			expect(providerToolNames).toEqual([
-				["continue_work", "finish_work", "switch_tools"],
-				["after_switch", "continue_work", "finish_work"],
+				["continue_work", "finish_work", "switch_tools", "wait_for_user"],
+				["after_switch", "continue_work", "finish_work", "wait_for_user"],
 			]);
 		} finally {
 			harness.cleanup();
@@ -124,6 +134,7 @@ describe("extension active tools next-turn refresh", () => {
 				"continue_work",
 				"finish_work",
 				"load_more_tools",
+				"wait_for_user",
 			]);
 			expect(addedToolNames).toEqual([["after_load"]]);
 		} finally {
@@ -191,8 +202,8 @@ describe("extension active tools next-turn refresh", () => {
 			await harness.session.prompt("start");
 
 			expect(providerToolNames).toEqual([
-				["continue_work", "finish_work", "switch_tools"],
-				["after_switch", "continue_work", "finish_work"],
+				["continue_work", "finish_work", "switch_tools", "wait_for_user"],
+				["after_switch", "continue_work", "finish_work", "wait_for_user"],
 			]);
 			expect(providerSystemPrompts).toHaveLength(2);
 			expect(providerSystemPrompts[0]).toContain("keep this run override");

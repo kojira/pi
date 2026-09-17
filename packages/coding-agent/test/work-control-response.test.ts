@@ -9,6 +9,11 @@ const finish = () =>
 		reason: "Tests passed",
 		summary: "Report",
 	});
+const wait = () =>
+	fauxToolCall("wait_for_user", {
+		checkpointId: "checkpoint",
+		question: "Which account should I use?",
+	});
 
 describe("explicit work response", () => {
 	it("publishes only the explicit finish tool, preserving its identity and arguments", () => {
@@ -31,6 +36,14 @@ describe("explicit work response", () => {
 		expect(normalizeWorkResponse(input)).toBe(input);
 	});
 
+	it("publishes only the explicit wait tool, preserving its question", () => {
+		const input = fauxAssistantMessage([{ type: "text", text: "Which account should I use?" }, wait()], {
+			stopReason: "toolUse",
+		});
+		const result = normalizeWorkResponse(input);
+		expect(result.content).toEqual([input.content[1]]);
+	});
+
 	it.each(["length", "error", "aborted", "pending"] as const)("preserves %s responses", (stopReason) => {
 		const input = fauxAssistantMessage([{ type: "text", text: "Report" }, finish()], { stopReason });
 		expect(normalizeWorkResponse(input)).toBe(input);
@@ -48,9 +61,11 @@ describe("explicit work response", () => {
 		expect(normalizeWorkResponse(input).content).toEqual(input.content);
 	});
 
-	it("requires tool completion without a competing marker protocol", () => {
+	it("requires explicit finish and waiting tools without a competing marker protocol", () => {
 		expect(WORK_CONTROL_PROMPT).toContain("call finish_work");
 		expect(WORK_CONTROL_PROMPT).toContain("only in finish_work.summary");
+		expect(WORK_CONTROL_PROMPT).toContain("call wait_for_user");
+		expect(WORK_CONTROL_PROMPT).toContain("only in wait_for_user.question");
 		expect(WORK_CONTROL_PROMPT).not.toContain("<done");
 		expect(WORK_CONTROL_PROMPT).not.toContain("done:");
 	});

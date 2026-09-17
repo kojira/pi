@@ -89,9 +89,15 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"ls",
 			"powershell",
 			"read",
+			"wait_for_user",
 			"write",
 		]);
-		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "dynamic_tool", "finish_work"]);
+		expect(session.getActiveToolNames().sort()).toEqual([
+			"continue_work",
+			"dynamic_tool",
+			"finish_work",
+			"wait_for_user",
+		]);
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- read:");
 		expect(session.systemPrompt).not.toContain("- bash:");
@@ -106,8 +112,8 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["continue_work", "finish_work"]);
-		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work"]);
+		).toEqual(["continue_work", "finish_work", "wait_for_user"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work", "wait_for_user"]);
 		expect(session.systemPrompt).not.toContain("- dynamic_tool:");
 		session.dispose();
 	});
@@ -128,7 +134,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			noTools: "builtin",
 		});
 
-		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work", "wait_for_user"]);
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
 	});

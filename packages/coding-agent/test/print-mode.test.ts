@@ -144,6 +144,34 @@ describe("runPrintMode", () => {
 		}
 	});
 
+	it("prints an awaiting-input question once", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "duplicate question" }));
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		runtimeHost.session.subscribe.mockImplementation((callback) => {
+			listener = callback;
+			return () => {};
+		});
+		runtimeHost.session.prompt.mockImplementation(async () => {
+			listener?.({
+				type: "work_contract",
+				record: {
+					status: "awaiting_input",
+					checkpointId: "checkpoint-1",
+					nextAction: "Confirm the account",
+					question: "Which account should I use?",
+				},
+			});
+		});
+		const write = vi.spyOn(outputGuard, "writeRawStdout").mockImplementation(() => {});
+		expect(
+			await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				initialMessage: "Prepare the test",
+			}),
+		).toBe(0);
+		expect(write).toHaveBeenCalledExactlyOnceWith("Which account should I use?\n");
+	});
+
 	it("emits session_shutdown in text mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;

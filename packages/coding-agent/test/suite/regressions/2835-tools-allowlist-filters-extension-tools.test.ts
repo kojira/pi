@@ -73,8 +73,14 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["continue_work", "dynamic_tool", "finish_work", "read"]);
-		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "dynamic_tool", "finish_work", "read"]);
+		).toEqual(["continue_work", "dynamic_tool", "finish_work", "read", "wait_for_user"]);
+		expect(session.getActiveToolNames().sort()).toEqual([
+			"continue_work",
+			"dynamic_tool",
+			"finish_work",
+			"read",
+			"wait_for_user",
+		]);
 		expect(session.systemPrompt).toContain("- read: Read file contents");
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- bash:");
@@ -90,8 +96,8 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["continue_work", "finish_work"]);
-		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work"]);
+		).toEqual(["continue_work", "finish_work", "wait_for_user"]);
+		expect(session.getActiveToolNames().sort()).toEqual(["continue_work", "finish_work", "wait_for_user"]);
 		expect(session.systemPrompt).not.toContain("- bash:");
 		expect(session.systemPrompt).not.toContain("dynamic_tool");
 		session.dispose();

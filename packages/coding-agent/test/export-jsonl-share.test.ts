@@ -104,6 +104,7 @@ describe("JSONL share export", () => {
 					description: "Render a value for sharing",
 				}),
 				expect.objectContaining({ name: "continue_work" }),
+				expect.objectContaining({ name: "wait_for_user" }),
 				expect.objectContaining({ name: "finish_work" }),
 			]);
 			expect(shareEntry.data).not.toHaveProperty("renderedTools");

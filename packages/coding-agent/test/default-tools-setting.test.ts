@@ -63,8 +63,20 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "continue_work", "edit", "find", "finish_work", "grep", "ls", "powershell", "read", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["grep", "find", "continue_work", "finish_work"]);
+		).toEqual([
+			"bash",
+			"continue_work",
+			"edit",
+			"find",
+			"finish_work",
+			"grep",
+			"ls",
+			"powershell",
+			"read",
+			"wait_for_user",
+			"write",
+		]);
+		expect(session.getActiveToolNames()).toEqual(["grep", "find", "continue_work", "wait_for_user", "finish_work"]);
 		expect(session.systemPrompt).toContain("- grep:");
 		expect(session.systemPrompt).not.toContain("- read:");
 		session.dispose();
@@ -79,6 +91,7 @@ describe("defaultTools setting", () => {
 			"edit",
 			"write",
 			"continue_work",
+			"wait_for_user",
 			"finish_work",
 		]);
 		expect(session.systemPrompt).toContain("- powershell: Execute PowerShell commands");
@@ -86,10 +99,10 @@ describe("defaultTools setting", () => {
 		session.dispose();
 	});
 
-	it("keeps both lifecycle controls available without work tools", async () => {
+	it("keeps all lifecycle controls available without work tools", async () => {
 		const session = await createSession(["continue_work"]);
 
-		expect(session.getActiveToolNames()).toEqual(["continue_work", "finish_work"]);
+		expect(session.getActiveToolNames()).toEqual(["continue_work", "wait_for_user", "finish_work"]);
 		expect(session.systemPrompt).toContain("- continue_work:");
 		expect(session.systemPrompt).toContain("Ordinary progress replies continue automatically");
 		expect(session.systemPrompt).toContain("Put the final answer only in finish_work.summary");
@@ -142,6 +155,7 @@ describe("defaultTools setting", () => {
 			"grep",
 			"sdk_tool",
 			"static_tool",
+			"wait_for_user",
 		]);
 		expect(session.getAllTools().map((tool) => tool.name)).toEqual(
 			expect.arrayContaining(["read", "dynamic_tool", "sdk_tool", "static_tool"]),
@@ -151,16 +165,25 @@ describe("defaultTools setting", () => {
 
 	it("preserves explicit tool option precedence", async () => {
 		const allowlistedSession = await createSession(["grep"], { tools: ["read"] });
-		expect(allowlistedSession.getActiveToolNames()).toEqual(["read", "continue_work", "finish_work"]);
+		expect(allowlistedSession.getActiveToolNames()).toEqual([
+			"read",
+			"continue_work",
+			"wait_for_user",
+			"finish_work",
+		]);
 		allowlistedSession.dispose();
 
 		const excludedSession = await createSession(["read", "grep"], { excludeTools: ["read"] });
-		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "continue_work", "finish_work"]);
+		expect(excludedSession.getActiveToolNames()).toEqual(["grep", "continue_work", "wait_for_user", "finish_work"]);
 		excludedSession.dispose();
 
 		const toolLessSession = await createSession(["read"], { noTools: "all" });
-		expect(toolLessSession.getAllTools().map((tool) => tool.name)).toEqual(["continue_work", "finish_work"]);
-		expect(toolLessSession.getActiveToolNames()).toEqual(["continue_work", "finish_work"]);
+		expect(toolLessSession.getAllTools().map((tool) => tool.name)).toEqual([
+			"continue_work",
+			"wait_for_user",
+			"finish_work",
+		]);
+		expect(toolLessSession.getActiveToolNames()).toEqual(["continue_work", "wait_for_user", "finish_work"]);
 		toolLessSession.dispose();
 	});
 
@@ -178,8 +201,20 @@ describe("defaultTools setting", () => {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.sort(),
-		).toEqual(["bash", "continue_work", "edit", "find", "finish_work", "grep", "ls", "powershell", "read", "write"]);
-		expect(session.getActiveToolNames()).toEqual(["ls", "continue_work", "finish_work"]);
+		).toEqual([
+			"bash",
+			"continue_work",
+			"edit",
+			"find",
+			"finish_work",
+			"grep",
+			"ls",
+			"powershell",
+			"read",
+			"wait_for_user",
+			"write",
+		]);
+		expect(session.getActiveToolNames()).toEqual(["ls", "continue_work", "wait_for_user", "finish_work"]);
 		session.dispose();
 	});
 });
