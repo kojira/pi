@@ -21,6 +21,7 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/index.ts";
+import { workResponse } from "./work-response.ts";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -51,9 +52,7 @@ describe("AgentSessionRuntime characterization", () => {
 				{ id: "faux-2", reasoning: false },
 			],
 		});
-		faux.setResponses(
-			["one", "two", "three"].map((text) => fauxAssistantMessage(`${text}\n<done reason="Answered"/>`)),
-		);
+		faux.setResponses(["one", "two", "three"].map((text) => workResponse(text)));
 
 		const authStorage = AuthStorage.inMemory();
 		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
@@ -435,9 +434,7 @@ describe("AgentSessionRuntime characterization", () => {
 				{ id: "faux-2", reasoning: false },
 			],
 		});
-		faux.setResponses(
-			["one", "two", "three"].map((text) => fauxAssistantMessage(`${text}\n<done reason="Answered"/>`)),
-		);
+		faux.setResponses(["one", "two", "three"].map((text) => workResponse(text)));
 
 		const authStorage = AuthStorage.inMemory();
 		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));

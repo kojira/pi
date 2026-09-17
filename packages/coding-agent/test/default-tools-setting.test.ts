@@ -91,7 +91,9 @@ describe("defaultTools setting", () => {
 
 		expect(session.getActiveToolNames()).toEqual(["continue_work", "finish_work"]);
 		expect(session.systemPrompt).toContain("- continue_work:");
-		expect(session.systemPrompt).toContain("intermediate progress update");
+		expect(session.systemPrompt).toContain("Ordinary progress replies continue automatically");
+		expect(session.systemPrompt).toContain("Put the final answer only in finish_work.summary");
+		expect(session.systemPrompt).not.toContain("Use continue_work in the same response");
 		expect(session.systemPrompt).toContain("waiting for user input");
 		session.dispose();
 	});

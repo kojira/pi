@@ -2,15 +2,16 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 const harnesses: Harness[] = [];
 afterEach(() => {
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 });
 const next = () => fauxAssistantMessage("Progress report.");
-const done = () => fauxAssistantMessage('Verified.\n<done reason="Verification passed"/>');
+const done = () => workResponse("Verified.");
 
-describe("text work control", () => {
+describe("explicit work control", () => {
 	it("continues from text, executes work once, then finishes without another user message", async () => {
 		let executions = 0;
 		const harness = await createHarness({
@@ -61,7 +62,7 @@ describe("text work control", () => {
 		expect(JSON.stringify(harness.session.messages)).not.toContain("Correct the missing");
 	});
 
-	it("reconsiders finish when new input arrives before executing its normalized operation", async () => {
+	it("reconsiders finish when new input arrives before executing its explicit operation", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		let queued = false;
@@ -141,6 +142,42 @@ describe("text work control", () => {
 		await harness.session.prompt("Verify");
 		expect(harness.faux.state.callCount).toBe(1);
 		expect(harness.session.workContract?.status).not.toBe("resolved");
+	});
+
+	it.each(['<done reason="Finished"/>', "done:Finished"])(
+		"treats former markers as ordinary continued text: %s",
+		async (text) => {
+			const harness = await createHarness({});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage(text), done()]);
+			await harness.session.prompt("Verify");
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(getUserTexts(harness)).toEqual(["Verify"]);
+			expect(harness.eventsOfType("tool_execution_start").map((event) => event.toolName)).toEqual(["finish_work"]);
+			expect(harness.session.workContract?.status).toBe("resolved");
+		},
+	);
+
+	it("publishes the summary once when a provider also emits final answer text", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([
+			(context) => {
+				const response = workResponse("Verified.", context);
+				response.content.unshift({ type: "text", text: "Verified." });
+				return response;
+			},
+		]);
+		await harness.session.prompt("Verify");
+		const assistantEnds = harness.eventsOfType("message_end").filter((event) => event.message.role === "assistant");
+		expect(assistantEnds).toHaveLength(1);
+		const message = assistantEnds[0].message;
+		if (message.role !== "assistant") throw new Error("Expected an assistant response");
+		expect(message.content).not.toContainEqual({ type: "text", text: "Verified." });
+		expect(harness.eventsOfType("work_contract").filter((event) => event.record.status === "resolved")).toHaveLength(
+			1,
+		);
+		expect(harness.session.getLastAssistantText()).toBe("Verified.");
 	});
 
 	it("requires no mode or initial checkpoint to finish a simple response", async () => {

@@ -14,6 +14,7 @@ export function createFinishWorkToolDefinition(
 		promptGuidelines: [
 			"While a work checkpoint is active, keep executing authorized work until you call finish_work.",
 			"A text-only reply does not finish an active checkpoint. Incorporate new user instructions before deciding.",
+			"Put the final answer only in finish_work.summary, without accompanying assistant text. Do not use a text ending marker.",
 		],
 		parameters: finishWorkSchema,
 		async execute(_toolCallId, decision, signal) {

@@ -151,7 +151,7 @@ describe("AgentSession queue characterization", () => {
 				const sawSteer = context.messages.some(
 					(message) => message.role === "user" && getMessageText(message) === "steer now",
 				);
-				return workResponse(sawSteer ? "saw steer" : "missing steer");
+				return workResponse(sawSteer ? "saw steer" : "missing steer", context);
 			},
 		]);
 
@@ -185,7 +185,7 @@ describe("AgentSession queue characterization", () => {
 								.join("\n"),
 						),
 				);
-				return workResponse("follow-up response");
+				return workResponse("follow-up response", context);
 			},
 		]);
 
@@ -260,7 +260,7 @@ describe("AgentSession queue characterization", () => {
 				batchedUserMessages = context.messages
 					.filter((message) => message.role === "user")
 					.map((message) => getMessageText(message));
-				return workResponse("batched steer response");
+				return workResponse("batched steer response", context);
 			},
 		]);
 
@@ -288,7 +288,7 @@ describe("AgentSession queue characterization", () => {
 				batchedUserMessages = context.messages
 					.filter((message) => message.role === "user")
 					.map((message) => getMessageText(message));
-				return workResponse("batched follow-up response");
+				return workResponse("batched follow-up response", context);
 			},
 		]);
 
@@ -317,7 +317,7 @@ describe("AgentSession queue characterization", () => {
 						typeof message.content !== "string" &&
 						message.content.some((part) => part.type === "text" && part.text === "steer custom"),
 				);
-				return workResponse("done");
+				return workResponse("done", context);
 			},
 		]);
 
@@ -351,7 +351,7 @@ describe("AgentSession queue characterization", () => {
 						typeof message.content !== "string" &&
 						message.content.some((part) => part.type === "text" && part.text === "follow-up custom"),
 				);
-				return workResponse("done");
+				return workResponse("done", context);
 			},
 		]);
 
@@ -387,7 +387,7 @@ describe("AgentSession queue characterization", () => {
 						typeof message.content !== "string" &&
 						message.content.some((part) => part.type === "text" && part.text === "carry this"),
 				);
-				return workResponse("done");
+				return workResponse("done", context);
 			},
 		]);
 

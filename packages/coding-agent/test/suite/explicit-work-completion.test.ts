@@ -2,6 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
+import { workResponse } from "./work-response.ts";
 
 const harnesses: Harness[] = [];
 afterEach(() => {
@@ -114,7 +115,7 @@ describe("explicit work completion", () => {
 		await harness.session.prompt("Verify");
 		expect(harness.session.messages.at(-1)?.role).toBe("custom");
 		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
-		harness.setResponses([fauxAssistantMessage('Answer to new input\n<done reason="Answered"/>')]);
+		harness.setResponses([workResponse("Answer to new input")]);
 		await harness.session.prompt("A new question");
 		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");
 	});
@@ -134,11 +135,7 @@ describe("explicit work completion", () => {
 				void harness.session.followUp("A new question");
 			}
 		});
-		harness.setResponses([
-			checkpoint(),
-			finish(),
-			fauxAssistantMessage('Answer to new input\n<done reason="Answered"/>'),
-		]);
+		harness.setResponses([checkpoint(), finish(), workResponse("Answer to new input")]);
 		await harness.session.prompt("Verify");
 		expect(getUserTexts(harness)).toEqual(["Verify", "A new question"]);
 		expect(harness.session.getLastAssistantText()).toBe("Answer to new input");

@@ -459,7 +459,7 @@ describe("AgentSession compaction characterization", () => {
 			(context) => {
 				order.push("provider");
 				resumedRequest = JSON.stringify(context.messages);
-				return workResponse("finished after compaction");
+				return workResponse("finished after compaction", context);
 			},
 		]);
 
@@ -636,7 +636,7 @@ describe("AgentSession compaction characterization", () => {
 			fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" }),
 			(context) => {
 				resumedRequest = JSON.stringify(context.messages);
-				return workResponse("finished after compaction");
+				return workResponse("finished after compaction", context);
 			},
 			workResponse("finished after delayed steering"),
 		]);

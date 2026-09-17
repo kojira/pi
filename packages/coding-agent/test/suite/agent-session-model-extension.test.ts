@@ -333,7 +333,7 @@ describe("AgentSession model and extension characterization", () => {
 								.map((part) => part.text)
 								.join("\n")
 						: "";
-				return workResponse(text);
+				return workResponse(text, context);
 			},
 		]);
 

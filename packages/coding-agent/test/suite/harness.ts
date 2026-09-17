@@ -54,10 +54,18 @@ export function getUserTexts(harness: Harness): string[] {
 		.map((message) => getMessageText(message));
 }
 
+/** Conversation-content assertions include explicit finish summaries; delivery tests inspect events instead. */
 export function getAssistantTexts(harness: Harness): string[] {
 	return harness.session.messages
 		.filter((message) => message.role === "assistant")
-		.map((message) => getMessageText(message));
+		.map((message) => {
+			const text = getMessageText(message);
+			if (text) return text;
+			const finish = message.content.find((block) => block.type === "toolCall" && block.name === "finish_work");
+			return finish?.type === "toolCall" && typeof finish.arguments.summary === "string"
+				? finish.arguments.summary
+				: "";
+		});
 }
 
 export interface HarnessOptions {

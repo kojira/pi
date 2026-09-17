@@ -84,13 +84,13 @@ export interface FauxResponse {
 }
 
 /** Shorthand: a string becomes a simple text response. */
-export type FauxResponseInput = FauxResponse | string;
+export type FauxResponseInput = FauxResponse | string | ((context: Context) => FauxResponse);
 
 // ============================================================================
 // Faux stream function
 // ============================================================================
 
-function normalizeResponse(input: FauxResponseInput): FauxResponse {
+function normalizeResponse(input: FauxResponse | string): FauxResponse {
 	if (typeof input === "string") {
 		return { text: input };
 	}
@@ -300,7 +300,8 @@ export function createFauxStreamFn(responses: FauxResponseInput[]): {
 		state.callCount++;
 		state.contexts.push(context);
 
-		const resp = normalizeResponse(responses[index]);
+		const input = responses[index];
+		const resp = normalizeResponse(typeof input === "function" ? input(context) : input);
 		const message = buildAssistantMessage(resp);
 		const stream = createAssistantMessageEventStream();
 

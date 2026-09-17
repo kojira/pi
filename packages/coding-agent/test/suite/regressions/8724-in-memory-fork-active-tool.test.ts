@@ -91,7 +91,7 @@ describe("regression #8724: in-memory fork during an active tool turn", () => {
 		harness.setResponses([
 			(context) => {
 				capturedRoles = context.messages.map((message) => message.role);
-				return workResponse("next response");
+				return workResponse("next response", context);
 			},
 		]);
 		await runtime.session.prompt("next prompt");

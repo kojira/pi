@@ -22,6 +22,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { BuildSystemPromptOptions } from "../src/core/system-prompt.ts";
+import { workResponse } from "./suite/work-response.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 // Mock stream that mimics AssistantMessageEventStream
@@ -221,8 +222,8 @@ describe("AgentSession concurrent prompt guard", () => {
 						stream.push({ type: "start", partial: createAssistantMessage("") });
 						stream.push({
 							type: "done",
-							reason: "stop",
-							message: createAssistantMessage('Steered\n<done reason="Steering handled"/>'),
+							reason: "toolUse",
+							message: workResponse("Steered", context),
 						});
 						return;
 					}
@@ -314,14 +315,14 @@ describe("AgentSession concurrent prompt guard", () => {
 				systemPrompt: "Test",
 				tools: [],
 			},
-			streamFn: () => {
+			streamFn: (_model, context) => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
 					stream.push({
 						type: "done",
-						reason: "stop",
-						message: createAssistantMessage('Done\n<done reason="Answered"/>'),
+						reason: "toolUse",
+						message: workResponse("Done", context),
 					});
 				});
 				return stream;
@@ -384,30 +385,9 @@ describe("AgentSession concurrent prompt guard", () => {
 				queueMicrotask(() => {
 					const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
 					if (toolResultCount > 0) {
-						const message: AssistantMessage = {
-							role: "assistant",
-							content: [
-								{
-									type: "text",
-									text: 'done\n<done reason="Done"/>',
-								},
-							],
-							api: "anthropic-messages",
-							provider: "anthropic",
-							model: "mock",
-							usage: {
-								input: 1,
-								output: 1,
-								cacheRead: 0,
-								cacheWrite: 0,
-								totalTokens: 2,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-							},
-							stopReason: "stop",
-							timestamp: Date.now(),
-						};
+						const message = workResponse("done", context);
 						stream.push({ type: "start", partial: { ...message, content: [] } });
-						stream.push({ type: "done", reason: "stop", message });
+						stream.push({ type: "done", reason: "toolUse", message });
 						return;
 					}
 
@@ -537,30 +517,9 @@ describe("AgentSession concurrent prompt guard", () => {
 					const hasToolResult = context.messages.some((message) => message.role === "toolResult");
 
 					if (hasToolResult) {
-						const message: AssistantMessage = {
-							role: "assistant",
-							content: [
-								{
-									type: "text",
-									text: 'done\n<done reason="Done"/>',
-								},
-							],
-							api: "anthropic-messages",
-							provider: "anthropic",
-							model: "mock",
-							usage: {
-								input: 1,
-								output: 1,
-								cacheRead: 0,
-								cacheWrite: 0,
-								totalTokens: 2,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-							},
-							stopReason: "stop",
-							timestamp: Date.now(),
-						};
+						const message = workResponse("done", context);
 						stream.push({ type: "start", partial: { ...message, content: [] } });
-						stream.push({ type: "done", reason: "stop", message });
+						stream.push({ type: "done", reason: "toolUse", message });
 						return;
 					}
 

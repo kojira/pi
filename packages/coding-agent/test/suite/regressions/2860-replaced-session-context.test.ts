@@ -44,7 +44,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		const faux = registerFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
-		faux.setResponses(responses.map(workResponse));
+		faux.setResponses(responses.map((text) => workResponse(text)));
 
 		const authStorage = AuthStorage.inMemory();
 		await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
@@ -204,7 +204,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(stalePiThrows).toBe(true);
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:Hello from the new session!",
-			"assistant:hello reply",
+			"assistant:",
 			"toolResult:hello reply",
 		]);
 	});
@@ -236,10 +236,10 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:seed",
-			"assistant:seed reply",
+			"assistant:",
 			"toolResult:seed reply",
 			"user:fork callback message",
-			"assistant:fork reply",
+			"assistant:",
 			"toolResult:fork reply",
 		]);
 	});
@@ -275,10 +275,10 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(runtime.session.sessionFile).toBe(targetSessionPath);
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:target",
-			"assistant:target reply",
+			"assistant:",
 			"toolResult:target reply",
 			"user:switch callback message",
-			"assistant:switch reply",
+			"assistant:",
 			"toolResult:switch reply",
 		]);
 	});

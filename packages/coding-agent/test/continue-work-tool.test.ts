@@ -66,7 +66,9 @@ describe("continue_work tool", () => {
 		const definition = createContinueWorkToolDefinition();
 		const guidelines = definition.promptGuidelines?.join("\n") ?? "";
 
-		expect(guidelines).toContain("intermediate progress update");
+		expect(guidelines).toContain("Ordinary progress replies continue automatically");
+		expect(guidelines).toContain("only when an explicit tool-result checkpoint is useful");
+		expect(guidelines).not.toContain("Use continue_work in the same response");
 		expect(guidelines).toContain("perform its nextAction");
 		expect(guidelines).toContain("waiting for user input");
 	});
