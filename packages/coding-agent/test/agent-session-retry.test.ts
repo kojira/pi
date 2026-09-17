@@ -10,6 +10,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
+import { workResponse } from "./suite/work-response.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -82,7 +83,7 @@ describe("AgentSession retry", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: () => {
+			streamFn: (_model, context) => {
 				callCount++;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -94,9 +95,9 @@ describe("AgentSession retry", () => {
 						stream.push({ type: "start", partial: msg });
 						stream.push({ type: "error", reason: "error", error: msg });
 					} else {
-						const msg = createAssistantMessage('Success\n<done reason="Recovered"/>');
+						const msg = workResponse("Success", context);
 						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "done", reason: "stop", message: msg });
+						stream.push({ type: "done", reason: "toolUse", message: msg });
 					}
 				});
 				return stream;
@@ -177,7 +178,7 @@ describe("AgentSession retry", () => {
 	it("retries provider network_error failures", async () => {
 		const created = await createSession({ failCount: 0 });
 		let callCount = 0;
-		const streamFn = () => {
+		const streamFn: Agent["streamFunction"] = (_model, context) => {
 			callCount++;
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
@@ -191,9 +192,9 @@ describe("AgentSession retry", () => {
 					return;
 				}
 
-				const msg = createAssistantMessage('Recovered after retry\n<done reason="Recovered"/>');
+				const msg = workResponse("Recovered after retry", context);
 				stream.push({ type: "start", partial: msg });
-				stream.push({ type: "done", reason: "stop", message: msg });
+				stream.push({ type: "done", reason: "toolUse", message: msg });
 			});
 			return stream;
 		};
@@ -255,7 +256,7 @@ describe("AgentSession retry", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: () => {
+			streamFn: (_model, context) => {
 				callCount++;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -281,9 +282,9 @@ describe("AgentSession retry", () => {
 						stream.push({ type: "done", reason: "toolUse", message: msg });
 					} else {
 						// Third call (after tool result): final response
-						const msg = createAssistantMessage('Final answer.\n<done reason="Answered"/>');
+						const msg = workResponse("Final answer.", context);
 						stream.push({ type: "start", partial: msg });
-						stream.push({ type: "done", reason: "stop", message: msg });
+						stream.push({ type: "done", reason: "toolUse", message: msg });
 					}
 				});
 				return stream;

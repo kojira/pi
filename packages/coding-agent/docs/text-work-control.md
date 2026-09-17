@@ -1,20 +1,15 @@
-# Text work control — approved design v4
+# Explicit work control — approved design
 
-Every main response uses one lifecycle. The only text control is a standalone final line:
+Every main response uses one lifecycle. Only an explicit `finish_work` tool call ends work. Its current checkpoint ID, outcome, nonempty reason and summary are required. The final answer belongs only in `finish_work.summary`, not accompanying assistant text.
 
-```text
-Verification passed.
-<done reason="Verification passed"/>
-```
+Ordinary text responses continue inference with the existing transcript. There is no text ending marker, continuation marker, format-correction prompt, synthetic finish/continue tool call, synthetic user input, repair counter or repair-limit error. Former XML and plain-text markers are ordinary text with no control meaning. Normal progress text remains visible. `continue_work` remains available for explicit checkpoints but is not required for progress.
 
-The reason must be nonempty. Use `&quot;` for embedded quotes and `&amp;` for ampersands. A marker in a code fence or quotation is literal, not a decision.
+The runtime supplies the current checkpoint ID and validates the explicit finish decision before durably resolving it. Tool allowlists still restrict actual work tools. Mixed finish batches are rejected before execution. New input invalidates stale finish decisions.
 
-Without a valid done marker, Pi continues inference with the existing transcript. There is no continuation marker, JSON control payload, format-correction prompt, synthetic continue tool, synthetic user input, repair counter or repair-limit error. Old work-control markers have no control meaning. Normal progress text remains visible. Auxiliary compaction and branch summaries are not main work turns.
+Main responses remain buffered: if a normal response contains a `finish_work` call, accompanying assistant text is omitted before public events and transcript insertion, preserving the call and its arguments. This prevents delivery of that response's text followed by its finish summary. No semantic deduplication is performed against earlier progress responses. Consumers deliver the resolution summary once. Auxiliary compaction and branch summaries bypass the main-response adapter.
 
-A valid marker is stripped before delivery and normalized to the existing finish operation with its reason, current checkpoint ID and visible text as summary (or the reason when there is no visible text). Explicit work tools remain available. Tool allowlists still restrict actual work tools. Markers mixed with tool calls are rejected before execution.
+The low-level agent loop checks whether its owner needs another inference at the text boundary, after queued input, without replaying tools or ending and relaunching the session. Pi binds this to the active work contract; there is no user-selectable mode. Abort, provider failures, output truncation and existing retry/compaction recovery remain distinct from normal continuation.
 
-The low-level agent loop checks whether its owner needs another inference at the text boundary, after queued input, without replaying tools or ending and relaunching the session. Pi always binds this to the active work contract; there is no user-selectable mode. Abort, provider failures, output truncation and existing retry/compaction recovery remain distinct from normal continuation. New input invalidates stale finish decisions.
+This does not guarantee correct model judgment: a model may still finish prematurely or continue unnecessarily. If it never finishes, normal continuation has no repair cap; the operator can cancel.
 
-This does not guarantee correct model judgment: a model may still finish prematurely or continue unnecessarily. If it never finishes, normal continuation has no format-repair cap; the operator can cancel. Main responses remain buffered to hide terminal markers.
-
-Validation targets: consecutive text-only inference without extra messages or tool calls, tools followed by completion, no legacy marker compatibility, literal/malformed markers, reason escaping, stale input, abort, provider errors, compaction and single delivery of the final summary. Deterministic tests must be distinguished from live provider and transport acceptance. No production cutover is part of implementation approval.
+Validation targets: ordinary text continuation without extra messages or tool calls, explicit finish, former markers not ending work, summary-only delivery, stale input, abort, provider errors and auxiliary summary isolation. Deterministic tests, live provider tests and transport acceptance are separate evidence. No production cutover is part of implementation approval.

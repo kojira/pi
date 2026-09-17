@@ -4,13 +4,19 @@
  */
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, createHarnessWithExtensions, type Harness } from "./test-harness.ts";
+import { workResponse } from "./suite/work-response.ts";
+import { createHarness, createHarnessWithExtensions, type FauxResponse, type Harness } from "./test-harness.ts";
 
-function final(text: string): string {
-	return `${text}\n<done reason="Fixture complete"/>`;
+function final(text: string, overrides: Partial<FauxResponse> = {}): (context: Context) => FauxResponse {
+	return (context) => ({
+		...overrides,
+		toolCalls: workResponse(text, context)
+			.content.filter((block) => block.type === "toolCall")
+			.map((call) => ({ id: call.id, name: call.name, args: call.arguments })),
+	});
 }
 
 describe("test harness", () => {
@@ -31,8 +37,12 @@ describe("test harness", () => {
 		expect(assistantMessages).toHaveLength(1);
 
 		const msg = assistantMessages[0] as AssistantMessage;
-		expect(msg.content[0]).toEqual({ type: "text", text: "hello world" });
-		expect(msg.content[1]).toMatchObject({ type: "toolCall", name: "finish_work" });
+		expect(msg.content).toHaveLength(1);
+		expect(msg.content[0]).toMatchObject({
+			type: "toolCall",
+			name: "finish_work",
+			arguments: { summary: "hello world" },
+		});
 		expect(harness.session.workContract?.status).toBe("resolved");
 	});
 
@@ -47,7 +57,7 @@ describe("test harness", () => {
 
 		const assistantTexts = harness.session.messages
 			.filter((m): m is AssistantMessage => m.role === "assistant")
-			.map((m) => m.content.find((c) => c.type === "text")?.text);
+			.map((m) => m.content.find((c) => c.type === "toolCall")?.arguments.summary);
 
 		expect(assistantTexts).toEqual(["first", "second", "third"]);
 	});
@@ -128,7 +138,7 @@ describe("test harness", () => {
 
 	it("custom usage numbers", async () => {
 		harness = await createHarness({
-			responses: [{ text: final("big response"), usage: { input: 100000, output: 5000 } }],
+			responses: [final("big response", { usage: { input: 100000, output: 5000 } })],
 		});
 
 		await harness.session.prompt("hi");
@@ -175,7 +185,7 @@ describe("test harness", () => {
 
 		const texts = harness.session.messages
 			.filter((m): m is AssistantMessage => m.role === "assistant")
-			.map((m) => m.content.find((c) => c.type === "text")?.text);
+			.map((m) => m.content.find((c) => c.type === "toolCall")?.arguments.summary);
 
 		expect(texts).toEqual(["a", "b", "a"]);
 	});
@@ -192,7 +202,7 @@ describe("test harness", () => {
 
 	it("preserves thinking in buffered responses", async () => {
 		harness = await createHarness({
-			responses: [{ thinking: "let me think about this", text: final("answer") }],
+			responses: [final("answer", { thinking: "let me think about this" })],
 		});
 
 		await harness.session.prompt("hi");

@@ -52,7 +52,7 @@ describe("extension active tools next-turn refresh", () => {
 				},
 				(context) => {
 					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
-					return workResponse("done");
+					return workResponse("done", context);
 				},
 			]);
 
@@ -113,7 +113,7 @@ describe("extension active tools next-turn refresh", () => {
 							.filter((message) => message.role === "toolResult")
 							.flatMap((message) => message.addedToolNames ?? []),
 					);
-					return workResponse("done");
+					return workResponse("done", context);
 				},
 			]);
 
@@ -184,7 +184,7 @@ describe("extension active tools next-turn refresh", () => {
 				(context) => {
 					providerSystemPrompts.push(context.systemPrompt ?? "");
 					providerToolNames.push((context.tools ?? []).map((tool) => tool.name).sort());
-					return workResponse("done");
+					return workResponse("done", context);
 				},
 			]);
 

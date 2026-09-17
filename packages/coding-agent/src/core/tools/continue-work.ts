@@ -13,7 +13,7 @@ const continueWorkSchema = Type.Object({
 export const continueWorkToolSystemPromptContribution = {
 	snippet: "Mark an assistant update as intermediate and continue from a tool-result boundary",
 	guidelines: [
-		"Use continue_work in the same response as an intermediate progress update when more approved work remains and no user decision is needed.",
+		"Ordinary progress replies continue automatically. Use continue_work only when an explicit tool-result checkpoint is useful and more authorized work can begin immediately.",
 		"After continue_work returns, perform its nextAction instead of emitting another progress-only update.",
 		"Do not use continue_work when work is complete, blocked, cancelled, or waiting for user input.",
 	],

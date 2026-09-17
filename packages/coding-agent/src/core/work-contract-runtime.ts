@@ -4,10 +4,10 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import type { SessionManager } from "./session-manager.ts";
-import { TEXT_WORK_CONTROL_PROMPT, TextWorkControl } from "./text-work-control.ts";
 import { createContinueWorkToolDefinition } from "./tools/continue-work.ts";
 import { createFinishWorkToolDefinition } from "./tools/finish-work.ts";
 import { finishWorkSchema, WorkContract, type WorkContractRecord } from "./work-contract.ts";
+import { normalizeWorkResponse, WORK_CONTROL_PROMPT } from "./work-control-response.ts";
 
 const CUSTOM_TYPE = "pi.work-contract.v1";
 
@@ -87,7 +87,6 @@ export class WorkContractRuntime {
 			!signal?.aborted && this.contract.active && message.stopReason === "stop";
 		const streamFunction = agent.streamFunction;
 		this.originalStreamFunction = streamFunction;
-		const textControl = new TextWorkControl();
 		agent.streamFunction = async (model, context, options) => {
 			// Compaction and branch summaries share this stream function, but have
 			// their own abort signal and must not receive work-loop instructions.
@@ -110,12 +109,12 @@ export class WorkContractRuntime {
 				model,
 				{
 					...requestContext,
-					systemPrompt: `${requestContext.systemPrompt}\n${TEXT_WORK_CONTROL_PROMPT}`,
+					systemPrompt: `${requestContext.systemPrompt}\n${WORK_CONTROL_PROMPT}`,
 				},
 				options,
 			);
-			// Buffer the main response: emitting deltas first would leak the control suffix.
-			const message = textControl.normalize(await response.result(), record);
+			// Buffer the main response so finish_work summaries cannot duplicate already-emitted text.
+			const message = normalizeWorkResponse(await response.result());
 			const normalized = createAssistantMessageEventStream();
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
 				normalized.push({ type: "error", reason: message.stopReason, error: message });

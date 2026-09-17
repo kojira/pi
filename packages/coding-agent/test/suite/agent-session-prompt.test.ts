@@ -106,7 +106,7 @@ describe("AgentSession prompt characterization", () => {
 			}),
 			(context) => {
 				const toolResults = context.messages.filter((message) => message.role === "toolResult");
-				return workResponse(`tool results: ${toolResults.length}`);
+				return workResponse(`tool results: ${toolResults.length}`, context);
 			},
 		]);
 
