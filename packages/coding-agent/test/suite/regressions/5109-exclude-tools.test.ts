@@ -56,6 +56,7 @@ describe("regression #5109: exclude tools", () => {
 				"dynamic_tool",
 				"edit",
 				"finish_work",
+				"wait_for_user",
 				"write",
 			]);
 			expect(harness.session.systemPrompt).not.toContain("- read:");
@@ -76,8 +77,18 @@ describe("regression #5109: exclude tools", () => {
 		try {
 			await harness.session.bindExtensions({});
 
-			expect(toolNames(harness.session.getAllTools())).toEqual(["bash", "continue_work", "finish_work"]);
-			expect(harness.session.getActiveToolNames().sort()).toEqual(["bash", "continue_work", "finish_work"]);
+			expect(toolNames(harness.session.getAllTools())).toEqual([
+				"bash",
+				"continue_work",
+				"finish_work",
+				"wait_for_user",
+			]);
+			expect(harness.session.getActiveToolNames().sort()).toEqual([
+				"bash",
+				"continue_work",
+				"finish_work",
+				"wait_for_user",
+			]);
 			expect(harness.session.systemPrompt).toContain("- bash:");
 			expect(harness.session.systemPrompt).not.toContain("- read:");
 			expect(harness.session.systemPrompt).not.toContain("ask_question");

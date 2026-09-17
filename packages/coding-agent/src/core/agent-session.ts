@@ -3622,6 +3622,24 @@ export class AgentSession {
 			);
 			if (successfulFinish) return contract.decision.summary;
 		}
+		if (contract?.status === "awaiting_input" && lastAssistantMessage?.role === "assistant") {
+			const successfulWait = lastAssistantMessage.content.some(
+				(call) =>
+					call.type === "toolCall" &&
+					call.name === "wait_for_user" &&
+					call.arguments.checkpointId === contract.checkpointId &&
+					this.messages
+						.slice(lastAssistantIndex + 1)
+						.some(
+							(message) =>
+								message.role === "toolResult" &&
+								message.toolName === "wait_for_user" &&
+								message.toolCallId === call.id &&
+								!message.isError,
+						),
+			);
+			if (successfulWait) return contract.question;
+		}
 		const lastAssistant = this.messages
 			.slice()
 			.reverse()

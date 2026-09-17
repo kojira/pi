@@ -148,6 +148,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		if (mode === "text" && terminalWorkRecord?.status === "resolved") {
 			writeRawStdout(`${terminalWorkRecord.decision.summary}\n`);
+		} else if (mode === "text" && terminalWorkRecord?.status === "awaiting_input") {
+			writeRawStdout(`${terminalWorkRecord.question}\n`);
 		} else if (mode === "text" && terminalWorkRecord?.status === "suspended") {
 			console.error(terminalWorkRecord.reason);
 			exitCode = 1;

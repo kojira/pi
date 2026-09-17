@@ -85,7 +85,12 @@ describe("strict built-in tools", () => {
 				try {
 					const originalPrompt = session.systemPrompt;
 					await session.bindExtensions({});
-					expect(session.getActiveToolNames()).toEqual([...activeTools, "continue_work", "finish_work"]);
+					expect(session.getActiveToolNames()).toEqual([
+						...activeTools,
+						"continue_work",
+						"wait_for_user",
+						"finish_work",
+					]);
 					expect(session.systemPrompt).toBe(originalPrompt);
 					for (const name of strictToolNames) {
 						expect(session.getToolDefinition(name)?.constrainedSampling).toBe(false);

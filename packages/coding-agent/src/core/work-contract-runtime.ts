@@ -6,10 +6,14 @@ import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { createContinueWorkToolDefinition } from "./tools/continue-work.ts";
 import { createFinishWorkToolDefinition } from "./tools/finish-work.ts";
+import { createWaitForUserToolDefinition } from "./tools/wait-for-user.ts";
 import { finishWorkSchema, WorkContract, type WorkContractRecord } from "./work-contract.ts";
 import { normalizeWorkResponse, WORK_CONTROL_PROMPT } from "./work-control-response.ts";
 
-const CUSTOM_TYPE = "pi.work-contract.v1";
+// v2 adds awaiting_input. Keeping it separate lets an older binary ignore new
+// records on rollback instead of rejecting a status it cannot restore.
+const CUSTOM_TYPE = "pi.work-contract.v2";
+const LEGACY_CUSTOM_TYPE = "pi.work-contract.v1";
 
 function restoreRecord(data: unknown): WorkContractRecord {
 	if (
@@ -25,6 +29,9 @@ function restoreRecord(data: unknown): WorkContractRecord {
 	}
 	const base = { checkpointId: data.checkpointId, nextAction: data.nextAction };
 	if (data.status === "active") return { ...base, status: "active" };
+	if (data.status === "awaiting_input" && "question" in data && typeof data.question === "string") {
+		return { ...base, status: "awaiting_input", question: data.question };
+	}
 	if (data.status === "suspended" && "reason" in data && typeof data.reason === "string") {
 		return { ...base, status: "suspended", reason: data.reason };
 	}
@@ -50,7 +57,10 @@ export class WorkContractRuntime {
 		const entry = manager
 			.getBranch()
 			.reverse()
-			.find((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE);
+			.find(
+				(entry) =>
+					entry.type === "custom" && (entry.customType === CUSTOM_TYPE || entry.customType === LEGACY_CUSTOM_TYPE),
+			);
 		const restored = entry?.type === "custom" ? restoreRecord(entry.data) : undefined;
 		this.contract = new WorkContract(
 			(record) => {
@@ -78,6 +88,11 @@ export class WorkContractRuntime {
 				},
 			}),
 			defineTool(
+				createWaitForUserToolDefinition((input) => {
+					this.contract.waitForUser(input, this.requestInputVersion, agent.inputVersion);
+				}),
+			),
+			defineTool(
 				createFinishWorkToolDefinition((decision) => {
 					this.contract.finish(decision, this.requestInputVersion, agent.inputVersion);
 				}),
@@ -94,6 +109,7 @@ export class WorkContractRuntime {
 				return streamFunction(model, context, options);
 			}
 			this.requestInputVersion = agent.inputVersion;
+			if (this.contract.awaitingInput) this.contract.resumeAwaitingInput();
 			if (!this.contract.active) {
 				this.contract.begin(`work_${randomUUID()}`, "Address the current input within the authorized scope");
 			}
@@ -134,7 +150,10 @@ export class WorkContractRuntime {
 		const entry = this.manager
 			.getBranch()
 			.reverse()
-			.find((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE);
+			.find(
+				(entry) =>
+					entry.type === "custom" && (entry.customType === CUSTOM_TYPE || entry.customType === LEGACY_CUSTOM_TYPE),
+			);
 		this.contract.restore(entry?.type === "custom" ? restoreRecord(entry.data) : undefined);
 	}
 
@@ -145,11 +164,12 @@ export class WorkContractRuntime {
 			return { block: true, reason: error instanceof Error ? error.message : String(error) };
 		}
 		if (
-			context.toolCall.name === "finish_work" &&
+			(context.toolCall.name === "finish_work" || context.toolCall.name === "wait_for_user") &&
 			(this.requestInputVersion !== this.agent.inputVersion || this.agent.hasQueuedMessages())
 		) {
 			// End this batch, not the contract. The normal loop now drains follow-up input too.
-			return { block: true, reason: "New input arrived; consider it before finishing work", terminate: true };
+			const action = context.toolCall.name === "finish_work" ? "finishing work" : "waiting for the user";
+			return { block: true, reason: `New input arrived; consider it before ${action}`, terminate: true };
 		}
 		return undefined;
 	}

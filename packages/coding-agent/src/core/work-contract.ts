@@ -15,11 +15,19 @@ export const finishWorkSchema = Type.Object({
 
 export type FinishWorkInput = Static<typeof finishWorkSchema>;
 
+export const waitForUserSchema = Type.Object({
+	checkpointId: Type.String({ minLength: 1 }),
+	question: Type.String({ minLength: 1 }),
+});
+
+export type WaitForUserInput = Static<typeof waitForUserSchema>;
+
 export type WorkContractRecord = {
 	checkpointId: string;
 	nextAction: string;
 } & (
 	| { status: "active" }
+	| { status: "awaiting_input"; question: string }
 	| { status: "resolved"; decision: FinishWorkInput }
 	| { status: "suspended"; reason: string }
 );
@@ -53,17 +61,48 @@ export class WorkContract {
 		return this.record?.status === "active";
 	}
 
+	get awaitingInput(): boolean {
+		return this.record?.status === "awaiting_input";
+	}
+
 	begin(checkpointId: string, nextAction: string): void {
 		if (!checkpointId.trim() || !nextAction.trim()) throw new Error("Checkpoint ID and next action are required");
 		this.transition({ status: "active", checkpointId, nextAction });
 	}
 
-	/** Check the entire batch before any work tool can run alongside a finish decision. */
+	/** Check the entire batch before a terminal or waiting decision can run alongside another tool. */
 	validateBatch(message: AssistantMessage): void {
 		const calls = message.content.filter((block) => block.type === "toolCall");
-		if (calls.some((call) => call.name === "finish_work") && calls.length !== 1) {
-			throw new Error("finish_work must be the only tool call in its batch");
+		const workDecision = calls.find((call) => call.name === "finish_work" || call.name === "wait_for_user");
+		if (workDecision && calls.length !== 1) {
+			throw new Error(`${workDecision.name} must be the only tool call in its batch`);
 		}
+	}
+
+	waitForUser(input: WaitForUserInput, requestInputVersion: number, currentInputVersion: number): void {
+		const current = this.record;
+		if (current?.status !== "active") throw new Error("No active work contract");
+		if (input.checkpointId !== current.checkpointId) throw new Error("Stale work checkpoint ID");
+		if (requestInputVersion !== currentInputVersion) {
+			throw new Error("New input arrived after this request started; consider it before waiting");
+		}
+		if (!input.question.trim()) throw new Error("A question is required");
+		this.transition({
+			status: "awaiting_input",
+			checkpointId: current.checkpointId,
+			nextAction: current.nextAction,
+			question: input.question,
+		});
+	}
+
+	resumeAwaitingInput(): void {
+		const current = this.record;
+		if (current?.status !== "awaiting_input") return;
+		this.transition({
+			status: "active",
+			checkpointId: current.checkpointId,
+			nextAction: current.nextAction,
+		});
 	}
 
 	finish(decision: FinishWorkInput, requestInputVersion: number, currentInputVersion: number): void {

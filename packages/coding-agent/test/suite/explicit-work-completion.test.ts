@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
@@ -23,6 +23,17 @@ const finish = () =>
 		}),
 		{ stopReason: "toolUse" },
 	);
+const waitForUser = (question: string) => (context: Context) => {
+	const match = /Active work checkpoint ID: ("(?:[^"\\]|\\.)*")/.exec(context.systemPrompt ?? "");
+	if (!match) throw new Error("Wait fixture requires an active checkpoint");
+	return fauxAssistantMessage(
+		[
+			{ type: "text", text: question },
+			fauxToolCall("wait_for_user", { checkpointId: JSON.parse(match[1]), question }),
+		],
+		{ stopReason: "toolUse" },
+	);
+};
 
 describe("explicit work completion", () => {
 	it("keeps work instructions out of auxiliary summary requests during active work", async () => {
@@ -162,6 +173,50 @@ describe("explicit work completion", () => {
 			),
 		).toHaveLength(1);
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+	});
+
+	it("asks once, settles without another inference, and resumes the same checkpoint on user input", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([waitForUser("Which test account should I use?")]);
+		await harness.session.prompt("Prepare a collaborative test");
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.workContract).toMatchObject({
+			status: "awaiting_input",
+			question: "Which test account should I use?",
+		});
+		expect(harness.session.getLastAssistantText()).toBe("Which test account should I use?");
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+
+		harness.setResponses([workResponse("I will use the staging account")]);
+		await harness.session.prompt("Use staging-user-2");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(getUserTexts(harness)).toEqual(["Prepare a collaborative test", "Use staging-user-2"]);
+		expect(harness.session.workContract?.status).toBe("resolved");
+		expect(harness.session.getLastAssistantText()).toBe("I will use the staging account");
+	});
+
+	it("does not enter waiting state when user input races the wait call", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		let queued = false;
+		harness.session.subscribe((event) => {
+			if (
+				!queued &&
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.content.some((part) => part.type === "toolCall" && part.name === "wait_for_user")
+			) {
+				queued = true;
+				void harness.session.followUp("Use staging-user-2");
+			}
+		});
+		harness.setResponses([waitForUser("Which test account should I use?"), workResponse("Using staging-user-2")]);
+		await harness.session.prompt("Prepare a collaborative test");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(getUserTexts(harness)).toEqual(["Prepare a collaborative test", "Use staging-user-2"]);
+		expect(harness.session.workContract?.status).toBe("resolved");
+		expect(harness.session.getLastAssistantText()).toBe("Using staging-user-2");
 	});
 
 	it("continues ordinary text turns without correction until explicitly finished", async () => {

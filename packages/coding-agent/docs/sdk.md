@@ -523,7 +523,7 @@ Specify which built-in tools to enable:
 
 - Built-in tool names: `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`, `continue_work`
 - Default built-ins: `read`, `bash`, `edit`, `write`
-- `continue_work` is opt-in. It creates a tool-result continuation checkpoint after an intermediate progress update; see [Continuation checkpoints](continuation-checkpoints.md).
+- `continue_work` is opt-in. It creates a tool-result continuation checkpoint after an intermediate progress update. Runtime-owned `wait_for_user` and `finish_work` lifecycle controls remain available independently of this list; see [Continuation checkpoints](continuation-checkpoints.md).
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
