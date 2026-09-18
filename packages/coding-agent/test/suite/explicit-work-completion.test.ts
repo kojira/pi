@@ -175,6 +175,68 @@ describe("explicit work completion", () => {
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
+	it("parks active work at a terminating async tool boundary and resumes on native input", async () => {
+		const harness = await createHarness({
+			tools: [
+				{
+					name: "launch_async",
+					label: "Launch async",
+					description: "Launch work that reports completion through a native message",
+					parameters: Type.Object({}),
+					execute: async () => ({
+						content: [{ type: "text" as const, text: "Async run started" }],
+						details: { asyncId: "run-1" },
+						terminate: true,
+						park: true,
+					}),
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage(fauxToolCall("launch_async", {}), { stopReason: "toolUse" }),
+		]);
+		await harness.session.prompt("Delegate the verification");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.session.workContract).toMatchObject({ status: "active", checkpointId: "checkpoint-1" });
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+
+		harness.setResponses([finish()]);
+		await harness.session.sendCustomMessage(
+			{ customType: "async-completion", content: "run-1 completed", display: false },
+			{ triggerTurn: true },
+		);
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.session.workContract).toMatchObject({ status: "resolved", decision: { outcome: "completed" } });
+		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
+	});
+
+	it("does not treat an ordinary terminating tool as an external-input park", async () => {
+		const harness = await createHarness({
+			tools: [
+				{
+					name: "terminate_only",
+					label: "Terminate only",
+					description: "End the current tool batch without arranging a resume",
+					parameters: Type.Object({}),
+					execute: async () => ({
+						content: [{ type: "text" as const, text: "Stopped" }],
+						details: {},
+						terminate: true,
+					}),
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage(fauxToolCall("terminate_only", {}), { stopReason: "toolUse" }),
+		]);
+		await harness.session.prompt("Stop at a regular tool boundary");
+		expect(harness.session.workContract).toMatchObject({ status: "suspended", checkpointId: "checkpoint-1" });
+	});
+
 	it("asks once, settles without another inference, and resumes the same checkpoint on user input", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);

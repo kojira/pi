@@ -18,9 +18,9 @@ The existing agent loop continues after text-only progress while the contract is
 
 Main responses are buffered so accompanying text on a `finish_work` or `wait_for_user` response is omitted before public delivery and transcript insertion. The final answer is delivered from the resolution summary alone, and a waiting question is delivered from the persisted question alone. Incremental main-response deltas are not emitted. Ordinary progress remains visible; earlier responses are not semantically deduplicated. Auxiliary summaries bypass the main work adapter.
 
-`finish_work` resolves the checkpoint and terminates its batch. `wait_for_user` keeps the checkpoint unresolved, records `awaiting_input`, and terminates the current run. Mixed decision batches are rejected before execution. Input accepted after inference began invalidates a stale finish or wait decision; queued input is processed before another decision.
+`finish_work` resolves the checkpoint and terminates its batch. `wait_for_user` keeps the checkpoint unresolved, records `awaiting_input`, and terminates the current run. A successful terminating tool may additionally set `park: true` when it has arranged native external input; this ends the physical run while leaving the checkpoint active for that input. Mixed decision batches are rejected before execution. Input accepted after inference began invalidates a stale finish or wait decision; queued input is processed before another decision.
 
-SDK/RPC consumers receive `work_contract` events with the resolution summary or awaiting-input question. `agent_settled` means physical idle, not successful completion. Consumers should deliver the resolution summary once, rather than also rendering a finish tool result as another answer.
+SDK/RPC consumers receive `work_contract` events with the resolution summary or awaiting-input question. `agent_settled` means physical idle, not successful completion; a parked active checkpoint is therefore valid. Consumers should deliver the resolution summary once, rather than also rendering a finish tool result as another answer.
 
 ## Interruption and recovery
 

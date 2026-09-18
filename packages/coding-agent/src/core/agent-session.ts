@@ -679,7 +679,7 @@ export class AgentSession {
 		this._isAgentRunActive = false;
 		try {
 			try {
-				this._workContractRuntime.contract.suspend("Agent settled without an explicit finish decision");
+				this._workContractRuntime.onSettled();
 			} finally {
 				await this._extensionRunner.emit({ type: "agent_settled" });
 				this._emit({ type: "agent_settled" });

@@ -378,6 +378,11 @@ export interface AgentToolResult<T> {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/**
+	 * Keep owner-managed work active when this successful terminating result
+	 * returns the agent to physical idle. External input is expected to resume it.
+	 */
+	park?: boolean;
 }
 
 /**
