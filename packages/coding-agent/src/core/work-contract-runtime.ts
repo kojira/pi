@@ -50,6 +50,7 @@ export class WorkContractRuntime {
 	private readonly agent: Agent;
 	private readonly manager: SessionManager;
 	private requestInputVersion = 0;
+	private parkRequested = false;
 
 	constructor(agent: Agent, manager: SessionManager, publish: (record: WorkContractRecord) => void) {
 		this.agent = agent;
@@ -175,10 +176,31 @@ export class WorkContractRuntime {
 	}
 
 	onEvent(event: AgentEvent): void {
+		if (event.type === "message_start" && event.message.role === "assistant") {
+			// A new provider turn supersedes a park requested by an earlier tool batch,
+			// for example when queued user input arrived while that batch was running.
+			this.parkRequested = false;
+			return;
+		}
+		if (event.type === "tool_execution_end") {
+			if (!event.isError && event.result?.terminate === true && event.result?.park === true) {
+				this.parkRequested = true;
+			}
+			return;
+		}
 		if (event.type !== "message_end" || event.message.role !== "assistant" || !this.contract.active) return;
-		const message = event.message;
-		if (message.stopReason === "aborted") {
+		if (event.message.stopReason === "aborted") {
 			this.contract.suspend("Agent aborted");
+		}
+	}
+
+	onSettled(): void {
+		try {
+			if (this.contract.active && !this.parkRequested) {
+				this.contract.suspend("Agent settled without an explicit finish decision");
+			}
+		} finally {
+			this.parkRequested = false;
 		}
 	}
 }
