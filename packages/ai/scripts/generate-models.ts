@@ -84,6 +84,62 @@ function readGeneratorOptions(args: string[]): {
 
 const generatorOptions = readGeneratorOptions(process.argv.slice(2));
 
+const GENERATED_MODEL_IMPORT_PATTERN = /from "\.\/([^"/]+)\.models\.ts";/g;
+
+function readRequiredGeneratedProviderIds(): string[] {
+	const providersDir = join(packageRoot, "src", "providers");
+	const providerIds = new Set<string>();
+	for (const entry of readdirSync(providersDir)) {
+		if (!entry.endsWith(".ts") || entry.endsWith(".models.ts")) continue;
+		const source = readFileSync(join(providersDir, entry), "utf8");
+		for (const match of source.matchAll(GENERATED_MODEL_IMPORT_PATTERN)) providerIds.add(match[1]);
+	}
+	return [...providerIds].sort();
+}
+
+function readPackageName(): string {
+	const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { name?: unknown };
+	if (typeof packageJson.name !== "string" || packageJson.name.length === 0) {
+		throw new Error("AI package manifest has no package name");
+	}
+	return packageJson.name;
+}
+
+async function resolveLatestPublishedVersion(packageName: string): Promise<string> {
+	const url = `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`;
+	const response = await fetch(url);
+	if (!response.ok) throw new Error(`Published package metadata returned ${response.status}: ${url}`);
+	const metadata = (await response.json()) as { version?: unknown };
+	if (typeof metadata.version !== "string" || !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(metadata.version)) {
+		throw new Error(`Published package metadata has an invalid version: ${url}`);
+	}
+	return metadata.version;
+}
+
+async function fetchPublishedProviderModels(
+	packageName: string,
+	packageVersion: string,
+	providerId: string,
+): Promise<Model<Api>[]> {
+	const url = `https://unpkg.com/${packageName}@${packageVersion}/dist/providers/data/${encodeURIComponent(providerId)}.json`;
+	const response = await fetch(url);
+	if (!response.ok) {
+		throw new Error(`Published ${providerId} model data returned ${response.status}: ${url}`);
+	}
+	const grouped = (await response.json()) as Record<string, Record<string, Model<Api>>>;
+	const models = Object.values(grouped).flatMap((apiModels) => Object.values(apiModels));
+	if (models.length === 0) throw new Error(`Published ${providerId} model data is empty: ${url}`);
+	for (const model of models) {
+		if (model.provider !== providerId) {
+			throw new Error(`Published ${providerId} model data contains provider ${JSON.stringify(model.provider)}: ${url}`);
+		}
+	}
+	console.warn(
+		`Live model sources omitted ${providerId}; using ${models.length} model(s) from ${packageName}@${packageVersion}.`,
+	);
+	return models;
+}
+
 interface ModelsDevModel {
 	id: string;
 	name: string;
@@ -2943,6 +2999,21 @@ async function generateModels() {
 		applyOpenAIExplicitPromptCacheMetadata(model);
 	}
 	applyAnthropicAllowedFallbackModelMetadata(allModels.filter(isAnthropicFallbackMetadataModel));
+
+	// A live source can temporarily omit an entire provider. Recover its last
+	// released, immutable catalog rather than embedding provider-specific stale data
+	// or deleting a shard still imported by handwritten provider code.
+	const discoveredProviderIds = new Set(allModels.map((model) => model.provider));
+	const omittedProviderIds = readRequiredGeneratedProviderIds().filter(
+		(providerId) => !discoveredProviderIds.has(providerId),
+	);
+	if (omittedProviderIds.length > 0) {
+		const packageName = readPackageName();
+		const packageVersion = await resolveLatestPublishedVersion(packageName);
+		for (const providerId of omittedProviderIds) {
+			allModels.push(...(await fetchPublishedProviderModels(packageName, packageVersion, providerId)));
+		}
+	}
 
 	// Group by provider and deduplicate by model ID
 	const providers: Record<string, Record<string, Model<any>>> = {};
