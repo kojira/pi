@@ -105,10 +105,8 @@ describe("runPrintMode", () => {
 				type: "work_contract",
 				record: {
 					status: "resolved",
-					checkpointId: "checkpoint-1",
 					nextAction: "Verify",
 					decision: {
-						checkpointId: "checkpoint-1",
 						outcome: "completed",
 						reason: "Verified",
 						summary: "Done; not deployed",
@@ -156,7 +154,6 @@ describe("runPrintMode", () => {
 				type: "work_contract",
 				record: {
 					status: "awaiting_input",
-					checkpointId: "checkpoint-1",
 					nextAction: "Confirm the account",
 					question: "Which account should I use?",
 				},

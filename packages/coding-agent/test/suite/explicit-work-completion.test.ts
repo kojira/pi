@@ -13,27 +13,19 @@ const checkpoint = () =>
 		fauxToolCall("continue_work", { nextAction: "Perform the approved verification" }, { id: "checkpoint-1" }),
 		{ stopReason: "toolUse" },
 	);
-const finish = () =>
-	fauxAssistantMessage(
-		fauxToolCall("finish_work", {
-			checkpointId: "checkpoint-1",
-			outcome: "completed",
-			reason: "Verification is complete",
-			summary: "Verified; not deployed",
-		}),
-		{ stopReason: "toolUse" },
-	);
-const waitForUser = (question: string) => (context: Context) => {
-	const match = /Active work checkpoint ID: ("(?:[^"\\]|\\.)*")/.exec(context.systemPrompt ?? "");
-	if (!match) throw new Error("Wait fixture requires an active checkpoint");
-	return fauxAssistantMessage(
-		[
-			{ type: "text", text: question },
-			fauxToolCall("wait_for_user", { checkpointId: JSON.parse(match[1]), question }),
-		],
-		{ stopReason: "toolUse" },
-	);
-};
+const finishCall = (legacyCheckpointId?: string) =>
+	fauxToolCall("finish_work", {
+		...(legacyCheckpointId ? { checkpointId: legacyCheckpointId } : {}),
+		outcome: "completed",
+		reason: "Verification is complete",
+		summary: "Verified; not deployed",
+	});
+const finish = (legacyCheckpointId?: string) =>
+	fauxAssistantMessage(finishCall(legacyCheckpointId), { stopReason: "toolUse" });
+const waitForUser = (question: string) => (_context: Context) =>
+	fauxAssistantMessage([{ type: "text", text: question }, fauxToolCall("wait_for_user", { question })], {
+		stopReason: "toolUse",
+	});
 
 describe("explicit work completion", () => {
 	it("keeps work instructions out of auxiliary summary requests during active work", async () => {
@@ -105,6 +97,86 @@ describe("explicit work completion", () => {
 		expect(harness.session.getLastAssistantText()).toBe("Verified; not deployed");
 		expect(getUserTexts(harness)).toEqual(["Implement and verify"]);
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+	});
+
+	it("ignores a legacy model-supplied checkpoint ID without persisting any identifier", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		harness.setResponses([checkpoint(), finish("checkpoint-from-old-history")]);
+		await harness.session.prompt("Verify");
+		expect(harness.session.workContract).toMatchObject({
+			status: "resolved",
+			decision: { outcome: "completed" },
+		});
+		expect(harness.session.workContract).not.toHaveProperty("checkpointId");
+		expect(
+			harness.session.workContract?.status === "resolved" ? harness.session.workContract.decision : {},
+		).not.toHaveProperty("checkpointId");
+		const result = harness.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolName === "finish_work",
+		);
+		expect(result?.role === "toolResult" ? result.details : undefined).not.toHaveProperty("checkpointId");
+	});
+
+	it("parks without another model call when finish_work validation fails", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		let unexpectedCall = false;
+		expect(harness.session.agent.state.tools.find((tool) => tool.name === "finish_work")).toMatchObject({
+			errorBehavior: "park",
+		});
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage(fauxToolCall("finish_work", { outcome: "completed", reason: "Done" }), {
+				stopReason: "toolUse",
+			}),
+			() => {
+				unexpectedCall = true;
+				return fauxAssistantMessage("must not run");
+			},
+		]);
+		await harness.session.prompt("Verify");
+		expect(unexpectedCall).toBe(false);
+		expect(harness.session.workContract?.status).toBe("active");
+		const result = harness.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolName === "finish_work",
+		);
+		expect(result?.role === "toolResult" ? result.isError : false).toBe(true);
+	});
+
+	it.each([
+		["unknown", fauxToolCall("missing_tool", {})],
+		["schema-invalid", fauxToolCall("verify", {})],
+	])("parks a mixed finish batch without repair when its other tool is %s", async (_kind, otherCall) => {
+		const harness = await createHarness({
+			tools: [
+				{
+					name: "verify",
+					label: "Verify",
+					description: "Verify a target",
+					parameters: Type.Object({ target: Type.String() }),
+					execute: async () => ({
+						content: [{ type: "text" as const, text: "verified" }],
+						details: {},
+					}),
+				},
+			],
+		});
+		harnesses.push(harness);
+		let unexpectedCall = false;
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage([otherCall, finishCall()], { stopReason: "toolUse" }),
+			() => {
+				unexpectedCall = true;
+				return fauxAssistantMessage("must not run");
+			},
+		]);
+		await harness.session.prompt("Verify");
+		expect(unexpectedCall).toBe(false);
+		expect(harness.session.workContract?.status).toBe("active");
+		const finishEnd = harness.eventsOfType("tool_execution_end").find((event) => event.toolName === "finish_work");
+		expect(finishEnd).toMatchObject({ isError: true, result: { terminate: true, park: true } });
 	});
 
 	it("preserves a finish summary across context-only messages, but not a later assistant response", async () => {
@@ -199,7 +271,8 @@ describe("explicit work completion", () => {
 		]);
 		await harness.session.prompt("Delegate the verification");
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.session.workContract).toMatchObject({ status: "active", checkpointId: "checkpoint-1" });
+		expect(harness.session.workContract).toMatchObject({ status: "active" });
+		expect(harness.session.workContract).not.toHaveProperty("checkpointId");
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 
 		harness.setResponses([finish()]);
@@ -234,10 +307,11 @@ describe("explicit work completion", () => {
 			fauxAssistantMessage(fauxToolCall("terminate_only", {}), { stopReason: "toolUse" }),
 		]);
 		await harness.session.prompt("Stop at a regular tool boundary");
-		expect(harness.session.workContract).toMatchObject({ status: "suspended", checkpointId: "checkpoint-1" });
+		expect(harness.session.workContract).toMatchObject({ status: "suspended" });
+		expect(harness.session.workContract).not.toHaveProperty("checkpointId");
 	});
 
-	it("asks once, settles without another inference, and resumes the same checkpoint on user input", async () => {
+	it("asks once, settles without another inference, and resumes the same work on user input", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		harness.setResponses([waitForUser("Which test account should I use?")]);
@@ -258,7 +332,7 @@ describe("explicit work completion", () => {
 		expect(harness.session.getLastAssistantText()).toBe("I will use the staging account");
 	});
 
-	it("does not enter waiting state when user input races the wait call", async () => {
+	it("commits waiting output, then processes user input queued during the call", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
 		let queued = false;
@@ -277,8 +351,34 @@ describe("explicit work completion", () => {
 		await harness.session.prompt("Prepare a collaborative test");
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(getUserTexts(harness)).toEqual(["Prepare a collaborative test", "Use staging-user-2"]);
+		expect(harness.eventsOfType("work_contract").map((event) => event.record.status)).toEqual([
+			"active",
+			"awaiting_input",
+			"active",
+			"resolved",
+		]);
 		expect(harness.session.workContract?.status).toBe("resolved");
 		expect(harness.session.getLastAssistantText()).toBe("Using staging-user-2");
+	});
+
+	it("includes the immediately preceding assistant text in every automatic continuation request", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		let observed = false;
+		harness.setResponses([
+			checkpoint(),
+			fauxAssistantMessage("DIAGNOSTIC_PROGRESS"),
+			(context) => {
+				const previous = context.messages.at(-1);
+				observed =
+					previous?.role === "assistant" &&
+					previous.content.some((part) => part.type === "text" && part.text === "DIAGNOSTIC_PROGRESS");
+				return finish();
+			},
+		]);
+		await harness.session.prompt("Implement and verify");
+		expect(observed).toBe(true);
+		expect(harness.session.workContract?.status).toBe("resolved");
 	});
 
 	it("continues ordinary text turns without correction until explicitly finished", async () => {

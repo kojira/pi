@@ -3609,7 +3609,6 @@ export class AgentSession {
 				(call) =>
 					call.type === "toolCall" &&
 					call.name === "finish_work" &&
-					call.arguments.checkpointId === contract.checkpointId &&
 					this.messages
 						.slice(lastAssistantIndex + 1)
 						.some(
@@ -3627,7 +3626,6 @@ export class AgentSession {
 				(call) =>
 					call.type === "toolCall" &&
 					call.name === "wait_for_user" &&
-					call.arguments.checkpointId === contract.checkpointId &&
 					this.messages
 						.slice(lastAssistantIndex + 1)
 						.some(

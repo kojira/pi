@@ -4,53 +4,55 @@ import { describe, expect, it } from "vitest";
 import { type FinishWorkInput, WorkContract, type WorkContractRecord } from "../src/core/work-contract.ts";
 
 const decision: FinishWorkInput = {
-	checkpointId: "checkpoint-1",
 	outcome: "completed",
 	reason: "Approved changes are verified",
 	summary: "Changes implemented; not deployed",
 };
 
 describe("explicit work contract", () => {
-	it("rejects stale decisions without resolving or overwriting the checkpoint", () => {
+	it("finishes current work before starting newly queued work", () => {
 		const records: WorkContractRecord[] = [];
 		const contract = new WorkContract((record) => records.push(record));
-		contract.begin("checkpoint-1", "Implement the approved change");
-		expect(() => contract.finish(decision, 1, 2)).toThrow("New input arrived");
-		expect(contract.active).toBe(true);
-		contract.begin("checkpoint-2", "Verify the revised change");
-		expect(() => contract.finish(decision, 2, 2)).toThrow("Stale work checkpoint");
-		expect(records).toHaveLength(2);
-		contract.finish({ ...decision, checkpointId: "checkpoint-2" }, 2, 2);
+		contract.begin("Implement the approved change");
+		const committed = contract.finish(decision);
+		expect(committed).toEqual(decision);
 		expect(contract.state).toMatchObject({ status: "resolved", decision: { outcome: "completed" } });
+		contract.begin("Address newly queued input");
+		expect(contract.state).toEqual({ status: "active", nextAction: "Address newly queued input" });
+		expect(contract.state).not.toHaveProperty("checkpointId");
+		expect(records).toHaveLength(3);
 	});
 
-	it("pauses for user input and resumes the same checkpoint only after input", () => {
+	it("waits without creating or returning a work identifier", () => {
+		const contract = new WorkContract(() => {});
+		contract.begin("Confirm the test account");
+		const committed = contract.waitForUser({ question: "Which account should I use?" });
+		expect(committed).toEqual({ question: "Which account should I use?" });
+		expect(contract.state).toMatchObject({ status: "awaiting_input" });
+		expect(contract.state).not.toHaveProperty("checkpointId");
+	});
+
+	it("pauses for user input and resumes the same work only after input", () => {
 		const records: WorkContractRecord[] = [];
 		const contract = new WorkContract((record) => records.push(record));
-		contract.begin("checkpoint-1", "Confirm the test account");
-		contract.waitForUser({ checkpointId: "checkpoint-1", question: "Which account should I use?" }, 1, 1);
+		contract.begin("Confirm the test account");
+		contract.waitForUser({ question: "Which account should I use?" });
 		expect(contract.state).toEqual({
 			status: "awaiting_input",
-			checkpointId: "checkpoint-1",
 			nextAction: "Confirm the test account",
 			question: "Which account should I use?",
 		});
 		expect(contract.active).toBe(false);
 		expect(contract.awaitingInput).toBe(true);
 		contract.resumeAwaitingInput();
-		expect(contract.state).toEqual({
-			status: "active",
-			checkpointId: "checkpoint-1",
-			nextAction: "Confirm the test account",
-		});
+		expect(contract.state).toEqual({ status: "active", nextAction: "Confirm the test account" });
 		expect(records).toHaveLength(3);
 	});
 
-	it("restores an awaiting-input checkpoint without suspending it", () => {
+	it("restores an awaiting-input work state without suspending it", () => {
 		const records: WorkContractRecord[] = [];
 		const restored = new WorkContract((record) => records.push(record), {
 			status: "awaiting_input",
-			checkpointId: "checkpoint-1",
 			nextAction: "Confirm the test account",
 			question: "Which account should I use?",
 		});
@@ -62,18 +64,16 @@ describe("explicit work contract", () => {
 		const records: WorkContractRecord[] = [];
 		const restored = new WorkContract((record) => records.push(record), {
 			status: "active",
-			checkpointId: "checkpoint-1",
 			nextAction: "Run verification",
 		});
 		expect(restored.state?.status).toBe("suspended");
 		expect(records).toHaveLength(1);
-		expect(() => restored.finish(decision, 1, 1)).toThrow("No active work contract");
+		expect(() => restored.finish(decision)).toThrow("No active work contract");
 	});
 
 	it.each(["finish_work", "wait_for_user"])("rejects a mixed %s batch before any tool executes", (name) => {
 		const contract = new WorkContract(() => {});
-		const args =
-			name === "finish_work" ? decision : { checkpointId: "checkpoint-1", question: "Which account should I use?" };
+		const args = name === "finish_work" ? decision : { question: "Which account should I use?" };
 		const message = fauxAssistantMessage([
 			fauxToolCall("write", { path: "file", content: "change" }),
 			fauxToolCall(name, args),
@@ -81,12 +81,12 @@ describe("explicit work contract", () => {
 		expect(() => contract.validateBatch(message)).toThrow("only tool call");
 	});
 
-	it("rejects a stale wait decision without pausing", () => {
+	it("records waiting before later input resumes the same work", () => {
 		const contract = new WorkContract(() => {});
-		contract.begin("checkpoint-1", "Confirm the test account");
-		expect(() => contract.waitForUser({ checkpointId: "checkpoint-1", question: "Which account?" }, 1, 2)).toThrow(
-			"New input arrived",
-		);
+		contract.begin("Confirm the test account");
+		contract.waitForUser({ question: "Which account?" });
+		expect(contract.awaitingInput).toBe(true);
+		contract.resumeAwaitingInput();
 		expect(contract.active).toBe(true);
 	});
 
@@ -94,7 +94,7 @@ describe("explicit work contract", () => {
 		const contract = new WorkContract(() => {
 			throw new Error("disk failure");
 		});
-		expect(() => contract.begin("checkpoint-1", "Run verification")).toThrow("disk failure");
+		expect(() => contract.begin("Run verification")).toThrow("disk failure");
 		expect(contract.state).toBeUndefined();
 	});
 });

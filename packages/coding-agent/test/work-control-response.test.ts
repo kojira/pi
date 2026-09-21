@@ -4,19 +4,17 @@ import { normalizeWorkResponse, WORK_CONTROL_PROMPT } from "../src/core/work-con
 
 const finish = () =>
 	fauxToolCall("finish_work", {
-		checkpointId: "checkpoint",
 		outcome: "completed",
 		reason: "Tests passed",
 		summary: "Report",
 	});
 const wait = () =>
 	fauxToolCall("wait_for_user", {
-		checkpointId: "checkpoint",
 		question: "Which account should I use?",
 	});
 
 describe("explicit work response", () => {
-	it("publishes only the explicit finish tool, preserving its identity and arguments", () => {
+	it("publishes only the explicit finish tool and preserves its arguments", () => {
 		const input = fauxAssistantMessage([{ type: "text", text: "Report" }, finish()], { stopReason: "toolUse" });
 		const snapshot = structuredClone(input);
 		const result = normalizeWorkResponse(input);

@@ -4,9 +4,9 @@ Every main assistant request uses one work-control lifecycle, with no mode or pr
 
 ## Model decisions
 
-Report progress normally, then keep working. To end work, call `finish_work` with the current checkpoint ID, outcome (`completed`, `cancelled`, `waiting`, or `blocked`), nonempty reason and summary. Put the final answer only in the summary, without accompanying assistant text.
+Report progress normally, then keep working. To end work, call `finish_work` with the outcome (`completed`, `cancelled`, `waiting`, or `blocked`), nonempty reason and summary. No checkpoint identifier is used; the single active work state is implicit. Put the final answer only in the summary, without accompanying assistant text.
 
-When work needs information or a decision from the user, call `wait_for_user` with the current checkpoint ID and the complete question. Put the question only in the tool argument. The tool persists an awaiting-input state and ends the current run without starting another inference. New user input resumes the same checkpoint.
+When work needs information or a decision from the user, call `wait_for_user` with the complete question. Put the question only in the tool argument. The tool persists an awaiting-input state and ends the current run without starting another inference. New user input resumes the same checkpoint. A failed `finish_work` or `wait_for_user` attempt also ends and parks the current run; Pi does not start a repair inference or retry the tool.
 
 Text responses do not end or pause work. The main loop proceeds to its next inference using the existing context. It does not ask for a corrected response, add a synthetic user message, fabricate a continuation tool call, or run another classification model. No text ending or continuation marker exists; former markers have no control meaning.
 

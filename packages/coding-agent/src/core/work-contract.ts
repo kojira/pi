@@ -1,34 +1,37 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 
+const workOutcomeSchema = Type.Union([
+	Type.Literal("completed"),
+	Type.Literal("cancelled"),
+	Type.Literal("waiting"),
+	Type.Literal("blocked"),
+]);
+
+/** Model-facing finish arguments. Work identity is implicit because only one contract can be active. */
 export const finishWorkSchema = Type.Object({
-	checkpointId: Type.String({ minLength: 1 }),
-	outcome: Type.Union([
-		Type.Literal("completed"),
-		Type.Literal("cancelled"),
-		Type.Literal("waiting"),
-		Type.Literal("blocked"),
-	]),
+	outcome: workOutcomeSchema,
 	reason: Type.String({ minLength: 1 }),
 	summary: Type.String({ minLength: 1 }),
 });
 
 export type FinishWorkInput = Static<typeof finishWorkSchema>;
+export type FinishWorkDecision = FinishWorkInput;
+export const finishWorkDecisionSchema = finishWorkSchema;
 
 export const waitForUserSchema = Type.Object({
-	checkpointId: Type.String({ minLength: 1 }),
 	question: Type.String({ minLength: 1 }),
 });
 
 export type WaitForUserInput = Static<typeof waitForUserSchema>;
+export type WaitForUserDecision = WaitForUserInput;
 
 export type WorkContractRecord = {
-	checkpointId: string;
 	nextAction: string;
 } & (
 	| { status: "active" }
 	| { status: "awaiting_input"; question: string }
-	| { status: "resolved"; decision: FinishWorkInput }
+	| { status: "resolved"; decision: FinishWorkDecision }
 	| { status: "suspended"; reason: string }
 );
 
@@ -65,9 +68,9 @@ export class WorkContract {
 		return this.record?.status === "awaiting_input";
 	}
 
-	begin(checkpointId: string, nextAction: string): void {
-		if (!checkpointId.trim() || !nextAction.trim()) throw new Error("Checkpoint ID and next action are required");
-		this.transition({ status: "active", checkpointId, nextAction });
+	begin(nextAction: string): void {
+		if (!nextAction.trim()) throw new Error("A next action is required");
+		this.transition({ status: "active", nextAction });
 	}
 
 	/** Check the entire batch before a terminal or waiting decision can run alongside another tool. */
@@ -79,20 +82,17 @@ export class WorkContract {
 		}
 	}
 
-	waitForUser(input: WaitForUserInput, requestInputVersion: number, currentInputVersion: number): void {
+	waitForUser(input: WaitForUserInput): WaitForUserDecision {
 		const current = this.record;
 		if (current?.status !== "active") throw new Error("No active work contract");
-		if (input.checkpointId !== current.checkpointId) throw new Error("Stale work checkpoint ID");
-		if (requestInputVersion !== currentInputVersion) {
-			throw new Error("New input arrived after this request started; consider it before waiting");
-		}
 		if (!input.question.trim()) throw new Error("A question is required");
+		const decision: WaitForUserDecision = { question: input.question };
 		this.transition({
 			status: "awaiting_input",
-			checkpointId: current.checkpointId,
 			nextAction: current.nextAction,
-			question: input.question,
+			question: decision.question,
 		});
+		return decision;
 	}
 
 	resumeAwaitingInput(): void {
@@ -100,32 +100,31 @@ export class WorkContract {
 		if (current?.status !== "awaiting_input") return;
 		this.transition({
 			status: "active",
-			checkpointId: current.checkpointId,
 			nextAction: current.nextAction,
 		});
 	}
 
-	finish(decision: FinishWorkInput, requestInputVersion: number, currentInputVersion: number): void {
+	finish(decision: FinishWorkInput): FinishWorkDecision {
 		const current = this.record;
 		if (current?.status !== "active") throw new Error("No active work contract");
-		if (decision.checkpointId !== current.checkpointId) throw new Error("Stale work checkpoint ID");
-		if (requestInputVersion !== currentInputVersion) {
-			throw new Error("New input arrived after this request started; consider it before finishing work");
-		}
 		if (!decision.reason.trim() || !decision.summary.trim()) throw new Error("A reason and summary are required");
+		const committed: FinishWorkDecision = {
+			outcome: decision.outcome,
+			reason: decision.reason,
+			summary: decision.summary,
+		};
 		this.transition({
 			status: "resolved",
-			checkpointId: current.checkpointId,
 			nextAction: current.nextAction,
-			decision: structuredClone(decision),
+			decision: structuredClone(committed),
 		});
+		return committed;
 	}
 
 	suspend(reason: string): void {
 		if (this.record?.status !== "active") return;
 		this.transition({
 			status: "suspended",
-			checkpointId: this.record.checkpointId,
 			nextAction: this.record.nextAction,
 			reason,
 		});

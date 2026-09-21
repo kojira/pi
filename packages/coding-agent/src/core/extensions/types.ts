@@ -478,6 +478,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	name: string;
 	/** Human-readable label for UI */
 	label: string;
+	/** Control whether a failed invocation continues inference, terminates, or parks owner-managed work. */
+	errorBehavior?: "continue" | "terminate" | "park";
 	/** Description for LLM */
 	description: string;
 	/** Optional one-line snippet for the Available tools section in the default system prompt. Custom tools are omitted from that section when this is not provided. */
