@@ -591,8 +591,22 @@ type FinalizedToolCallOutcome = {
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
+function applyToolErrorBehavior(
+	result: AgentToolResult<any>,
+	tool: AgentTool<any>,
+	override?: { terminate?: boolean; park?: boolean },
+): AgentToolResult<any> {
+	const behavior = override?.park ? "park" : override?.terminate ? "terminate" : tool.errorBehavior;
+	if (behavior === "terminate" || behavior === "park") result.terminate = true;
+	if (behavior === "park") result.park = true;
+	return result;
+}
+
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
-	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+	return (
+		finalizedCalls.some((finalized) => finalized.result.park === true) ||
+		(finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true))
+	);
 }
 
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
@@ -641,18 +655,18 @@ async function prepareToolCall(
 			if (signal?.aborted) {
 				return {
 					kind: "immediate",
-					result: createErrorToolResult("Operation aborted"),
+					result: applyToolErrorBehavior(createErrorToolResult("Operation aborted"), tool),
 					isError: true,
 				};
 			}
 			if (beforeResult?.block) {
-				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
-				if (beforeResult.terminate === true) {
-					result.terminate = true;
-				}
 				return {
 					kind: "immediate",
-					result,
+					result: applyToolErrorBehavior(
+						createErrorToolResult(beforeResult.reason || "Tool execution was blocked"),
+						tool,
+						beforeResult,
+					),
 					isError: true,
 				};
 			}
@@ -660,7 +674,7 @@ async function prepareToolCall(
 		if (signal?.aborted) {
 			return {
 				kind: "immediate",
-				result: createErrorToolResult("Operation aborted"),
+				result: applyToolErrorBehavior(createErrorToolResult("Operation aborted"), tool),
 				isError: true,
 			};
 		}
@@ -673,7 +687,10 @@ async function prepareToolCall(
 	} catch (error) {
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: applyToolErrorBehavior(
+				createErrorToolResult(error instanceof Error ? error.message : String(error)),
+				tool,
+			),
 			isError: true,
 		};
 	}
@@ -714,7 +731,10 @@ async function executePreparedToolCall(
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
 		return {
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: applyToolErrorBehavior(
+				createErrorToolResult(error instanceof Error ? error.message : String(error)),
+				prepared.tool,
+			),
 			isError: true,
 		};
 	} finally {
@@ -753,11 +773,15 @@ async function finalizeExecutedToolCall(
 					details: afterResult.details ?? result.details,
 					usage: afterResult.usage ?? result.usage,
 					terminate: afterResult.terminate ?? result.terminate,
+					park: afterResult.park ?? result.park,
 				};
 				isError = afterResult.isError ?? isError;
 			}
 		} catch (error) {
-			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+			result = applyToolErrorBehavior(
+				createErrorToolResult(error instanceof Error ? error.message : String(error)),
+				prepared.tool,
+			);
 			isError = true;
 		}
 	}

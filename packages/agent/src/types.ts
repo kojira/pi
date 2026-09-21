@@ -66,6 +66,8 @@ export interface BeforeToolCallResult {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/** Keep owner-managed work active when this blocked call terminates the run. */
+	park?: boolean;
 }
 
 /**
@@ -92,6 +94,8 @@ export interface AfterToolCallResult {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/** Keep owner-managed work active when this terminating result returns the agent to idle. */
+	park?: boolean;
 }
 
 /** Context passed to `beforeToolCall`. */
@@ -397,6 +401,8 @@ export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
 	label: string;
+	/** Control whether a failed invocation continues inference, terminates, or parks owner-managed work. */
+	errorBehavior?: "continue" | "terminate" | "park";
 	/**
 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
 	 * Must return an object that matches `TParameters`.

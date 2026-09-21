@@ -1253,6 +1253,55 @@ describe("agentLoop with AgentMessage", () => {
 		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
 	});
 
+	it.each(["validation", "execution"])(
+		"should park without another LLM call when a park-on-error tool fails %s",
+		async (failure) => {
+			const toolSchema = Type.Object({ value: Type.String() });
+			const tool: AgentTool<typeof toolSchema, { value: string }> = {
+				name: "finish",
+				label: "Finish",
+				description: "Finish work",
+				parameters: toolSchema,
+				errorBehavior: "park",
+				async execute(_toolCallId, params) {
+					if (failure === "execution") throw new Error("commit failed");
+					return { content: [{ type: "text", text: params.value }], details: params };
+				},
+			};
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+			let llmCalls = 0;
+			const stream = agentLoop([createUserMessage("finish")], context, config, undefined, () => {
+				llmCalls++;
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage(
+						[
+							{
+								type: "toolCall",
+								id: "tool-1",
+								name: "finish",
+								arguments: failure === "validation" ? {} : { value: "done" },
+							},
+						],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				});
+				return mockStream;
+			});
+			const events: AgentEvent[] = [];
+			for await (const event of stream) events.push(event);
+			await stream.result();
+			expect(llmCalls).toBe(1);
+			const end = events.find((event) => event.type === "tool_execution_end");
+			expect(end?.type === "tool_execution_end" ? end.result : undefined).toMatchObject({
+				terminate: true,
+				park: true,
+			});
+		},
+	);
+
 	it("should stop after a blocked tool call when beforeToolCall sets terminate=true", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		let executed = false;

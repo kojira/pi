@@ -8,12 +8,9 @@ export function workResponse(
 	text: string,
 	context?: Context,
 ): AssistantMessage | ((context: Context) => AssistantMessage) {
-	const respond = (request: Context): AssistantMessage => {
-		const match = /Active work checkpoint ID: ("(?:[^"\\]|\\.)*")/.exec(request.systemPrompt ?? "");
-		if (!match) throw new Error("Final response fixture requires an active checkpoint");
+	const respond = (_request: Context): AssistantMessage => {
 		return fauxAssistantMessage(
 			fauxToolCall("finish_work", {
-				checkpointId: JSON.parse(match[1]),
 				outcome: "completed",
 				reason: "Fixture work complete",
 				summary: text || "Fixture work complete",
