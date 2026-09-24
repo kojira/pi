@@ -179,6 +179,40 @@ describe("explicit work completion", () => {
 		expect(finishEnd).toMatchObject({ isError: true, result: { terminate: true, park: true } });
 	});
 
+	it("rejects a structured-provider mixed work decision before any valid side effect", async () => {
+		let effects = 0;
+		const harness = await createHarness({
+			tools: [
+				{
+					name: "side_effect",
+					label: "Side effect",
+					description: "Record a side effect",
+					parameters: Type.Object({ value: Type.String() }),
+					execute: async () => {
+						effects++;
+						return { content: [{ type: "text" as const, text: "done" }], details: {} };
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		// The structured-output carrier returns the entire proposed batch before Pi dispatches any tool.
+		harness.setResponses([
+			fauxAssistantMessage([finishCall(), fauxToolCall("side_effect", { value: "must-not-run" })], {
+				stopReason: "toolUse",
+			}),
+		]);
+		await harness.session.prompt("Finish and modify state");
+		expect(effects).toBe(0);
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.workContract?.status).toBe("active");
+		expect(
+			harness.eventsOfType("tool_execution_end").find((event) => event.toolName === "side_effect"),
+		).toMatchObject({
+			isError: true,
+		});
+	});
+
 	it("preserves a finish summary across context-only messages, but not a later assistant response", async () => {
 		const harness = await createHarness({});
 		harnesses.push(harness);
