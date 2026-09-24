@@ -2,7 +2,7 @@
 
 Opt-in **text-only trial** for a newly started Pi session. It does not change Pi's default model, credentials, or Gateway executable. It is not a drop-in replacement for other models; compaction, resume, images, and mid-session model changes have the restrictions below.
 
-Install this example's pinned dependency with pnpm (age gate enabled), then load it explicitly:
+Install this example's pinned dependency with pnpm 11.14.0 (pinned in this directory's `packageManager` and `.mise.toml`; the root project is pinned to the same pnpm 11 version). This directory has its own 7-day `.npmrc` policy. pnpm 11 checks even *frozen lockfile* entries against that policy; CI runs both root and standalone installs. Then load it explicitly:
 
 ```sh
 cd packages/coding-agent/examples/extensions/claude-sdk-structured
