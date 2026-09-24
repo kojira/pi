@@ -21,10 +21,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 22.23.2
 
       - name: Setup pnpm
         run: corepack enable
+
+      - name: Verify pinned pnpm
+        run: test "$(pnpm --version)" = "11.14.0"
 
       - name: Install system dependencies
         run: |
@@ -34,6 +37,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Verify standalone Claude SDK lock under 7-day policy
+        working-directory: packages/coding-agent/examples/extensions/claude-sdk-structured
+        run: |
+          test "$(pnpm --version)" = "11.14.0"
+          pnpm install --ignore-workspace --frozen-lockfile --ignore-scripts
 
       - name: Build
         run: pnpm run build

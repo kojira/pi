@@ -51,9 +51,14 @@ export function installCodingAgentConsumer(directory, tarballs, packageManager =
 		packageManager: JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).packageManager,
 		dependencies: { [codingAgentName]: overrides[codingAgentName] },
 		overrides,
-		pnpm: { overrides },
 	};
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
+	if (packageManager === "pnpm") {
+		// pnpm 11 reads overrides from the workspace manifest, not package.json.
+		writeFileSync(join(directory, "pnpm-workspace.yaml"),
+			`packages: []\noverrides:\n${Object.entries(overrides).map(([name, path]) => `  ${JSON.stringify(name)}: ${JSON.stringify(path)}`).join("\n")}\n`);
+		writeFileSync(join(directory, ".npmrc"), readFileSync(new URL("../.npmrc", import.meta.url), "utf8"));
+	}
 	const installArgs = packageManager === "bun" ? ["--production"] : ["--prod", "--no-verify-store-integrity"];
 	run(packageManager, ["install", "--ignore-scripts", ...installArgs], { cwd: directory });
 }
