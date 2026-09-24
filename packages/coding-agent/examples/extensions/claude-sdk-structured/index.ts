@@ -283,18 +283,21 @@ export class SdkCarrier {
 				) {
 					throw new Error("SDK prototype cannot apply provider payload mutations safely");
 				}
-				this.busy = true;
-				this.system ??= system;
-				this.catalog ??= catalog;
-				if (!this.client) this.start(model, system, env);
-				const answer = new Promise<SDKResultMessage>((resolve, reject) => {
-					if (this.results.length) resolve(this.results.shift()!);
-					else this.waiting = { resolve, reject };
-				});
 				const abort = () => this.close(new Error("Pi request aborted"));
 				options?.signal?.addEventListener("abort", abort, { once: true });
 				let result: SDKResultMessage;
 				try {
+					// onPayload is asynchronous: Pi may abort while it is pending.
+					if (options?.signal?.aborted) throw new Error("Pi request aborted");
+					this.busy = true;
+					this.system ??= system;
+					this.catalog ??= catalog;
+					if (!this.client) this.start(model, system, env);
+					const answer = new Promise<SDKResultMessage>((resolve, reject) => {
+						if (this.results.length) resolve(this.results.shift()!);
+						else this.waiting = { resolve, reject };
+					});
+					if (this.closed || options?.signal?.aborted) throw new Error("Pi request aborted");
 					this.send(text);
 					result = await answer;
 				} finally {

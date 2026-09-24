@@ -106,6 +106,56 @@ describe("Claude SDK structured Pi boundary", () => {
 		}
 	});
 
+	it("does not start an SDK request if Pi aborts during the async payload hook", async () => {
+		let starts = 0;
+		const fakeQuery = (() => {
+			starts++;
+			throw new Error("SDK query must not start after cancellation");
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		const controller = new AbortController();
+		let entered!: () => void;
+		let release!: () => void;
+		const payloadEntered = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const payloadHeld = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		try {
+			const model = {
+				api: "claude-sdk-structured",
+				provider: "claude-sdk-structured",
+				id: "claude-opus-5-5",
+			} as Model<string>;
+			const response = carrier
+				.stream(
+					model,
+					{
+						systemPrompt: prompt,
+						messages: [{ role: "user", content: "Cancel this request" }] as Context["messages"],
+					},
+					{
+						signal: controller.signal,
+						onPayload: async () => {
+							entered();
+							await payloadHeld;
+						},
+					},
+				)
+				.result();
+			await payloadEntered;
+			controller.abort();
+			release();
+			const result = await response;
+			expect(result.stopReason).toBe("aborted");
+			expect(starts).toBe(0);
+		} finally {
+			release();
+			carrier.close();
+		}
+	});
+
 	it("rejects a resumed Pi transcript before issuing any SDK request", async () => {
 		let starts = 0;
 		const fakeQuery = (() => {
