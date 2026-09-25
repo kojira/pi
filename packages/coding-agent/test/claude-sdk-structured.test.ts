@@ -37,13 +37,107 @@ describe("Claude SDK structured Pi boundary", () => {
 		try {
 			await harness.session.bindExtensions({});
 			const model = harness.session.modelRuntime.getModel("claude-sdk-structured", "claude-opus-5-5");
-			expect(model).toMatchObject({ api: "claude-sdk-structured", input: ["text"] });
+			expect(model).toMatchObject({ api: "claude-sdk-structured", input: ["text", "image"], reasoning: true });
 			expect(harness.session.model?.provider).toBe(harness.getModel().provider);
 		} finally {
 			close?.();
 			harness.cleanup();
 		}
 	});
+	it("passes Pi image tool results to the SDK and resumes a committed SDK session", async () => {
+		const inputs: unknown[] = [];
+		const starts: Array<{ resume?: string; thinking?: unknown }> = [];
+		const sessionId = "11111111-1111-4111-8111-111111111111";
+		const fakeQuery = ((request: {
+			prompt: AsyncIterable<{ message: { content: unknown } }>;
+			options: { resume?: string; thinking?: unknown };
+		}) => {
+			starts.push(request.options);
+			const iterator = (async function* () {
+				for await (const input of request.prompt) {
+					inputs.push(input.message.content);
+					yield {
+						type: "result",
+						subtype: "success",
+						is_error: false,
+						session_id: sessionId,
+						num_turns: 1,
+						total_cost_usd: 0,
+						usage: { input_tokens: 1, output_tokens: 1 },
+						modelUsage: {},
+						structured_output: { name: "", args_json: "", final: "OK" },
+					};
+				}
+			})();
+			return Object.assign(iterator, {
+				close: () => undefined,
+				setMaxThinkingTokens: async () => {},
+				applyFlagSettings: async () => {},
+			});
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const model = {
+			api: "claude-sdk-structured",
+			provider: "claude-sdk-structured",
+			id: "claude-opus-5-5",
+		} as Model<string>;
+		const user = { role: "user", content: "Describe the work" } as Context["messages"][number];
+		const image = {
+			role: "toolResult",
+			toolName: "read",
+			toolCallId: "read-1",
+			isError: false,
+			content: [
+				{ type: "text", text: "frame" },
+				{ type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+			],
+		} as Context["messages"][number];
+		const firstCarrier = new SdkCarrier(undefined, fakeQuery);
+		firstCarrier.setSessionKey("22222222-2222-4222-8222-222222222222");
+		try {
+			const first = await firstCarrier.stream(model, { systemPrompt: prompt, messages: [user] }).result();
+			expect(first.responseId).toContain(sessionId);
+			const second = await firstCarrier
+				.stream(model, { systemPrompt: prompt, messages: [user, first, image] }, { reasoning: "high" })
+				.result();
+			expect(second.stopReason).toBe("stop");
+			expect(inputs[1]).toEqual([
+				{ type: "text", text: "Pi tool result for read: " },
+				{ type: "text", text: "frame" },
+				{ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+			]);
+			firstCarrier.close();
+			const resumed = new SdkCarrier(undefined, fakeQuery);
+			resumed.setSessionKey("22222222-2222-4222-8222-222222222222");
+			try {
+				const third = await resumed
+					.stream(
+						model,
+						{
+							systemPrompt: prompt,
+							messages: [
+								user,
+								first,
+								image,
+								second,
+								{ role: "user", content: "Continue" } as Context["messages"][number],
+							],
+						},
+						{ reasoning: "high" },
+					)
+					.result();
+				expect(third.stopReason).toBe("stop");
+				expect(starts).toHaveLength(2);
+				expect(starts[0]?.resume).toBeUndefined();
+				expect(starts[1]?.resume).toBe(sessionId);
+				expect(starts[1]?.thinking).toEqual({ type: "adaptive" });
+			} finally {
+				resumed.close();
+			}
+		} finally {
+			firstCarrier.close();
+		}
+	});
+
 	it("rejects auxiliary Pi summaries without poisoning an active SDK conversation", async () => {
 		let starts = 0;
 		const fakeQuery = ((request: { prompt: AsyncIterable<unknown> }) => {
@@ -179,7 +273,7 @@ describe("Claude SDK structured Pi boundary", () => {
 				})
 				.result();
 			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("starts only in a new Pi session");
+			expect(result.errorMessage).toContain("cannot resume this Pi session");
 			expect(starts).toBe(0);
 		} finally {
 			carrier.close();
