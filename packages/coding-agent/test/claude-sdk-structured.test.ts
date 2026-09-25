@@ -130,6 +130,45 @@ describe("Claude SDK structured Pi boundary", () => {
 				expect(starts[0]?.resume).toBeUndefined();
 				expect(starts[1]?.resume).toBe(sessionId);
 				expect(starts[1]?.thinking).toEqual({ type: "adaptive" });
+				resumed.close();
+				const recovered = new SdkCarrier(undefined, fakeQuery);
+				recovered.setSessionKey("22222222-2222-4222-8222-222222222222");
+				try {
+					const failed = {
+						...third,
+						content: [],
+						stopReason: "error" as const,
+						errorMessage: "SDK turn failed: error_max_turns",
+					};
+					const closed = { ...failed, errorMessage: "SDK session unavailable or safety turn limit reached" };
+					const next = await recovered
+						.stream(
+							model,
+							{
+								systemPrompt: prompt,
+								messages: [
+									user,
+									first,
+									image,
+									second,
+									{ role: "user", content: "Continue" } as Context["messages"][number],
+									third,
+									image,
+									failed,
+									closed,
+									{ role: "user", content: "Still working?" } as Context["messages"][number],
+								],
+							},
+							{ reasoning: "high" },
+						)
+						.result();
+					expect(next.stopReason).toBe("stop");
+					expect(starts[2]?.resume).toBe(sessionId);
+					expect(JSON.stringify(inputs[3])).toContain('"type":"image"');
+					expect(JSON.stringify(inputs[3])).toContain("Still working?");
+				} finally {
+					recovered.close();
+				}
 			} finally {
 				resumed.close();
 			}

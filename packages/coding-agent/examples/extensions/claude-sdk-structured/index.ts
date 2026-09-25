@@ -225,8 +225,9 @@ export class SdkCarrier {
 				...(this.thinking ? { effort: this.thinking === "minimal" ? "low" : this.thinking } : {}),
 				permissionMode: "dontAsk",
 				outputFormat: { type: "json_schema", schema: outputSchema },
-				maxTurns: 1,
-				maxBudgetUsd: 2,
+				// SDK tools are disabled; Pi accepts exactly one structured proposal per
+				// response. Do not impose prototype SDK turn/USD caps on a resident
+				// conversation: they terminate an unrelated Pi tool-result follow-up.
 				abortController: this.abortController,
 				pathToClaudeCodeExecutable: CLAUDE_CLI,
 			},
@@ -277,8 +278,7 @@ export class SdkCarrier {
 					);
 				}
 				const env = sdkFirstPartyEnv();
-				if (this.closed || this.busy || this.turns >= 100)
-					throw new Error("SDK session unavailable or safety turn limit reached");
+				if (this.closed || this.busy) throw new Error("SDK session unavailable");
 				if (this.client && this.activeModelId !== model.id)
 					throw new Error("Pi model changed; start a new session before using Claude SDK");
 				if (options?.signal?.aborted) throw new Error("Pi request aborted");
@@ -328,7 +328,21 @@ export class SdkCarrier {
 							(message) =>
 								message.role === "assistant" && (message.provider !== API || message.model !== model.id),
 						) ||
-						context.messages.slice(last + 1).some((message) => message.role === "assistant")
+						context.messages
+							.slice(last + 1)
+							.some(
+								(message) =>
+									message.role === "assistant" &&
+									!(
+										message.provider === API &&
+										message.model === model.id &&
+										message.stopReason === "error" &&
+										[
+											"SDK turn failed: error_max_turns",
+											"SDK session unavailable or safety turn limit reached",
+										].includes(message.errorMessage ?? "")
+									),
+							)
 					) {
 						throw new Error("Claude SDK cannot resume this Pi session; start a new session");
 					}
