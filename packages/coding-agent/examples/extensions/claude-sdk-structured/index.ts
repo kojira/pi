@@ -154,6 +154,17 @@ function emptyOutput(model: Model<Api>): AssistantMessage {
 	};
 }
 
+function failedCarrierResponse(message: Message, modelId: string): boolean {
+	return (
+		message.role === "assistant" &&
+		message.provider === API &&
+		message.model === modelId &&
+		message.stopReason === "error" &&
+		!message.responseId &&
+		message.content.length === 0
+	);
+}
+
 export class SdkCarrier {
 	private readonly observe?: (snapshot: SdkUsageSnapshot) => void;
 	private readonly queryFn: typeof query;
@@ -184,6 +195,10 @@ export class SdkCarrier {
 	private busy = false;
 	private closed = false;
 	private turns = 0;
+
+	isClosed(): boolean {
+		return this.closed;
+	}
 
 	private async *input(): AsyncGenerator<SDKUserMessage> {
 		while (true) {
@@ -248,10 +263,12 @@ export class SdkCarrier {
 		})();
 	}
 
-	onModelSelect(model: { provider: string; id: string }): void {
+	onModelSelect(model: { provider: string; id: string }): boolean {
 		if (this.activeModelId && (model.provider !== API || model.id !== this.activeModelId)) {
 			this.close(new Error("Pi model changed; start a new session before returning to Claude SDK"));
+			return true;
 		}
+		return false;
 	}
 
 	close(error = new Error("SDK session closed")): void {
@@ -315,39 +332,40 @@ export class SdkCarrier {
 							break;
 						}
 					}
-					const checkpoint = context.messages[last];
-					const match =
-						checkpoint?.role === "assistant"
-							? /^([0-9a-f-]{36})\.([0-9a-f]{64})$/i.exec(checkpoint.responseId ?? "")
-							: null;
-					if (
-						!match ||
-						!this.sessionKey ||
-						match[2] !== createHash("sha256").update(system).digest("hex") ||
-						context.messages.some(
-							(message) =>
-								message.role === "assistant" && (message.provider !== API || message.model !== model.id),
-						) ||
-						context.messages
-							.slice(last + 1)
-							.some(
-								(message) =>
-									message.role === "assistant" &&
-									!(
-										message.provider === API &&
-										message.model === model.id &&
-										message.stopReason === "error" &&
-										[
-											"SDK turn failed: error_max_turns",
-											"SDK session unavailable or safety turn limit reached",
-										].includes(message.errorMessage ?? "")
-									),
+					if (last < 0) {
+						// No Pi tool could have run without a committed SDK proposal.
+						// Restart the initial prompt only if the history is users and our
+						// empty failed responses, never an unknown assistant/tool result.
+						if (
+							!this.sessionKey ||
+							!context.messages.some((message) => failedCarrierResponse(message, model.id)) ||
+							context.messages.some(
+								(message) => message.role !== "user" && !failedCarrierResponse(message, model.id),
 							)
-					) {
-						throw new Error("Claude SDK cannot resume this Pi session; start a new session");
+						)
+							throw new Error("Claude SDK cannot resume this Pi session; start a new session");
+					} else {
+						const checkpoint = context.messages[last];
+						const match =
+							checkpoint?.role === "assistant"
+								? /^([0-9a-f-]{36})\.([0-9a-f]{64})$/i.exec(checkpoint.responseId ?? "")
+								: null;
+						if (
+							!match ||
+							!this.sessionKey ||
+							match[2] !== createHash("sha256").update(system).digest("hex") ||
+							context.messages.some(
+								(message) =>
+									message.role === "assistant" && (message.provider !== API || message.model !== model.id),
+							) ||
+							context.messages
+								.slice(last + 1)
+								.some((message) => message.role === "assistant" && !failedCarrierResponse(message, model.id))
+						)
+							throw new Error("Claude SDK cannot resume this Pi session; start a new session");
+						this.resumeId = match[1];
+						this.previous = context.messages.slice(0, last + 1);
 					}
-					this.resumeId = match[1];
-					this.previous = context.messages.slice(0, last + 1);
 				}
 				const added = context.messages.slice(this.previous.length);
 				if (
@@ -475,14 +493,31 @@ export class SdkCarrier {
 
 export function registerStructuredSdk(pi: ExtensionAPI, observe?: (snapshot: SdkUsageSnapshot) => void): () => void {
 	let carrier = new SdkCarrier(observe);
+	let sessionKey: string | undefined;
+	let modelSwitchBlocked = false;
+	const freshCarrier = () => {
+		carrier = new SdkCarrier(observe);
+		if (sessionKey) carrier.setSessionKey(sessionKey);
+	};
+	const stream = (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
+		// A failed SDK query closes only its carrier, not the Pi session. The
+		// next request resumes from the last committed proposal without rerunning
+		// any Pi tool; do not keep returning the same closed-carrier error.
+		if (carrier.isClosed() && sessionKey && !modelSwitchBlocked) freshCarrier();
+		return carrier.stream(model, context, options);
+	};
 	pi.on("session_shutdown", () => carrier.close());
-	pi.on("model_select", (event) => carrier.onModelSelect(event.model));
+	pi.on("model_select", (event) => {
+		if (carrier.onModelSelect(event.model)) modelSwitchBlocked = true;
+	});
 	pi.on("session_start", (event, ctx) => {
 		if (event.reason !== "startup") {
 			carrier.close();
-			carrier = new SdkCarrier(observe);
+			modelSwitchBlocked = false;
+			freshCarrier();
 		}
-		carrier.setSessionKey(ctx.sessionManager.getSessionId());
+		sessionKey = ctx.sessionManager.getSessionId();
+		carrier.setSessionKey(sessionKey);
 	});
 	pi.registerProvider(
 		createProvider({
@@ -534,10 +569,7 @@ export function registerStructuredSdk(pi: ExtensionAPI, observe?: (snapshot: Sdk
 					maxTokens: 16_384,
 				},
 			],
-			api: {
-				stream: (model, context, options) => carrier.stream(model, context, options),
-				streamSimple: (model, context, options) => carrier.stream(model, context, options),
-			},
+			api: { stream, streamSimple: stream },
 		}),
 	);
 	return () => carrier.close();
