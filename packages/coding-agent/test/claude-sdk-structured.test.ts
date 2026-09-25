@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
 	adaptPiPromptForClaudeSdk,
+	discordAttachmentHint,
 	parseSdkProposal,
 	registerStructuredSdk,
 	SdkCarrier,
@@ -44,6 +45,56 @@ describe("Claude SDK structured Pi boundary", () => {
 			harness.cleanup();
 		}
 	});
+	it("exposes the existing Gateway attachment CLI only for a verified Discord channel session", async () => {
+		const hint = discordAttachmentHint("/tmp/sessions/ch_1553040001598750731/2026-09-25.jsonl");
+		expect(hint).toContain("piscord send --channel dc:1553040001598750731 --file");
+		expect(hint).not.toContain("TOKEN");
+		expect(discordAttachmentHint("/tmp/sessions/local/2026-09-25.jsonl")).toBeUndefined();
+		expect(discordAttachmentHint("/tmp/sessions/ch_1553040001598750731/child/session.jsonl")).toBeUndefined();
+		const inputs: unknown[] = [];
+		const fakeQuery = ((request: { prompt: AsyncIterable<{ message: { content: unknown } }> }) => {
+			const iterator = (async function* () {
+				for await (const input of request.prompt) {
+					inputs.push(input.message.content);
+					yield {
+						type: "result",
+						subtype: "success",
+						is_error: false,
+						session_id: "11111111-1111-4111-8111-111111111111",
+						num_turns: 1,
+						total_cost_usd: 0,
+						usage: { input_tokens: 1, output_tokens: 1 },
+						modelUsage: {},
+						structured_output: { name: "", args_json: "", final: "OK" },
+					};
+				}
+			})();
+			return Object.assign(iterator, { close: () => undefined });
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		carrier.setSessionKey("22222222-2222-4222-8222-222222222222");
+		carrier.setDeliveryHint(hint);
+		try {
+			const result = await carrier
+				.stream(
+					{
+						api: "claude-sdk-structured",
+						provider: "claude-sdk-structured",
+						id: "claude-opus-5-5",
+					} as Model<string>,
+					{
+						systemPrompt: prompt,
+						messages: [{ role: "user", content: "この動画を貼って" } as Context["messages"][number]],
+					},
+				)
+				.result();
+			expect(result.stopReason).toBe("stop");
+			expect(inputs[0]).toContain("piscord send --channel dc:1553040001598750731 --file");
+		} finally {
+			carrier.close();
+		}
+	});
+
 	it("passes Pi image tool results to the SDK and resumes a committed SDK session", async () => {
 		const inputs: unknown[] = [];
 		const starts: Array<{ resume?: string; thinking?: unknown }> = [];
