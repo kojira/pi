@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { type Query, query, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -100,6 +100,14 @@ export function parseSdkProposal(
 
 type SdkInput = SDKUserMessage["message"]["content"];
 
+/** A Gateway-managed channel session supplies the target; never infer it from model prose. */
+export function discordAttachmentHint(sessionFile: string | undefined): string | undefined {
+	if (!sessionFile) return undefined;
+	const channel = /^ch_([1-9][0-9]{16,19})$/.exec(basename(dirname(sessionFile)))?.[1];
+	if (!channel) return undefined;
+	return `If this Discord user asks to attach a local file, Pi's bash tool can run the host Gateway CLI: piscord send --channel dc:${channel} --file <absolute-path> [--text <message>]. Use only this channel and only when explicitly asked. The CLI checks file existence/size and handles credentials; never read or print its token. Confirm the command succeeded before claiming an upload, and do not send the same file twice.`;
+}
+
 function sdkInput(messages: Message[]): SdkInput {
 	const blocks: Exclude<SdkInput, string> = [];
 	let hasImage = false;
@@ -172,6 +180,11 @@ export class SdkCarrier {
 	private sessionKey?: string;
 	private resumeId?: string;
 	private thinking?: SimpleStreamOptions["reasoning"];
+	private deliveryHint?: string;
+
+	setDeliveryHint(hint: string | undefined): void {
+		this.deliveryHint = hint;
+	}
 
 	setSessionKey(id: string): void {
 		if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("Invalid Pi session ID for Claude SDK");
@@ -377,7 +390,14 @@ export class SdkCarrier {
 						"Pi context contains another model's response; start a new session before using Claude SDK",
 					);
 				}
-				const input = sdkInput(added);
+				const baseInput = sdkInput(added);
+				// A per-turn carrier note leaves the signed SDK system-prompt fingerprint
+				// unchanged, so existing Pi sessions can resume after a code rollout.
+				const input: SdkInput = this.deliveryHint
+					? typeof baseInput === "string"
+						? `${baseInput}\n\n[Pi host capability] ${this.deliveryHint}`
+						: [...baseInput, { type: "text", text: `[Pi host capability] ${this.deliveryHint}` }]
+					: baseInput;
 				const payload = { systemPrompt: system, input, toolCatalog: catalog };
 				const fingerprint = JSON.stringify(payload);
 				const transformed = await options?.onPayload?.(payload, model);
@@ -494,10 +514,12 @@ export class SdkCarrier {
 export function registerStructuredSdk(pi: ExtensionAPI, observe?: (snapshot: SdkUsageSnapshot) => void): () => void {
 	let carrier = new SdkCarrier(observe);
 	let sessionKey: string | undefined;
+	let deliveryHint: string | undefined;
 	let modelSwitchBlocked = false;
 	const freshCarrier = () => {
 		carrier = new SdkCarrier(observe);
 		if (sessionKey) carrier.setSessionKey(sessionKey);
+		carrier.setDeliveryHint(deliveryHint);
 	};
 	const stream = (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
 		// A failed SDK query closes only its carrier, not the Pi session. The
@@ -517,7 +539,9 @@ export function registerStructuredSdk(pi: ExtensionAPI, observe?: (snapshot: Sdk
 			freshCarrier();
 		}
 		sessionKey = ctx.sessionManager.getSessionId();
+		deliveryHint = discordAttachmentHint(ctx.sessionManager.getSessionFile());
 		carrier.setSessionKey(sessionKey);
+		carrier.setDeliveryHint(deliveryHint);
 	});
 	pi.registerProvider(
 		createProvider({
