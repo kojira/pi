@@ -136,6 +136,7 @@ describe("Claude SDK structured Pi boundary", () => {
 				try {
 					const failed = {
 						...third,
+						responseId: undefined,
 						content: [],
 						stopReason: "error" as const,
 						errorMessage: "SDK turn failed: error_max_turns",
@@ -174,6 +175,66 @@ describe("Claude SDK structured Pi boundary", () => {
 			}
 		} finally {
 			firstCarrier.close();
+		}
+	});
+
+	it("restarts an initial SDK failure without replaying Pi tools or accepting unknown history", async () => {
+		const inputs: unknown[] = [];
+		const fakeQuery = ((request: { prompt: AsyncIterable<{ message: { content: unknown } }> }) => {
+			const iterator = (async function* () {
+				for await (const input of request.prompt) {
+					inputs.push(input.message.content);
+					yield {
+						type: "result",
+						subtype: "success",
+						is_error: false,
+						session_id: "11111111-1111-4111-8111-111111111111",
+						num_turns: 1,
+						total_cost_usd: 0,
+						usage: { input_tokens: 1, output_tokens: 1 },
+						modelUsage: {},
+						structured_output: { name: "", args_json: "", final: "OK" },
+					};
+				}
+			})();
+			return Object.assign(iterator, { close: () => undefined });
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		carrier.setSessionKey("22222222-2222-4222-8222-222222222222");
+		const model = {
+			api: "claude-sdk-structured",
+			provider: "claude-sdk-structured",
+			id: "claude-opus-5-5",
+		} as Model<string>;
+		const user = { role: "user", content: "First request" } as Context["messages"][number];
+		const failed = {
+			role: "assistant",
+			provider: model.provider,
+			model: model.id,
+			stopReason: "error",
+			errorMessage: "SDK transport failed",
+			content: [],
+		} as unknown as Context["messages"][number];
+		try {
+			const result = await carrier
+				.stream(model, {
+					systemPrompt: prompt,
+					messages: [user, failed, { role: "user", content: "Try again" } as Context["messages"][number]],
+				})
+				.result();
+			expect(result.stopReason).toBe("stop");
+			expect(JSON.stringify(inputs[0])).toContain("Try again");
+			const unknown = { ...failed, provider: "another-provider" };
+			const rejected = new SdkCarrier(undefined, fakeQuery);
+			rejected.setSessionKey("22222222-2222-4222-8222-222222222222");
+			try {
+				const error = await rejected.stream(model, { systemPrompt: prompt, messages: [user, unknown] }).result();
+				expect(error.stopReason).toBe("error");
+			} finally {
+				rejected.close();
+			}
+		} finally {
+			carrier.close();
 		}
 	});
 
