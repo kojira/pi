@@ -1,8 +1,8 @@
 // Opt-in Claude Agent SDK carrier. Pi alone validates and executes proposed tools.
 // Load with `pi -e ./packages/coding-agent/examples/extensions/claude-sdk-structured/index.ts`.
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -47,7 +47,6 @@ const outputSchema = {
 } as const;
 
 type Proposal = { name: string; args_json: string; final: string };
-type Awaiting = { resolve: (message: SDKResultMessage) => void; reject: (error: Error) => void };
 
 /** Numeric-only evidence. SDK modelUsage is cumulative; usage is per main-agent turn. */
 export type SdkUsageSnapshot = {
@@ -110,23 +109,31 @@ export function discordAttachmentHint(sessionFile: string | undefined): string |
 
 function sdkInput(messages: Message[]): SdkInput {
 	const blocks: Exclude<SdkInput, string> = [];
-	let hasImage = false;
 	const lines: string[] = [];
+	let hasImage = false;
 	for (const message of messages) {
-		if (message.role === "assistant") continue; // Already in the resident SDK session.
-		const prefix = message.role === "toolResult" ? `Pi tool result for ${message.toolName}: ` : "User: ";
-		const suffix = message.role === "toolResult" && message.isError ? " (error)" : "";
+		const prefix =
+			message.role === "toolResult"
+				? `Pi tool result for ${message.toolName} (${message.toolCallId})${message.isError ? " (error)" : ""}: `
+				: message.role === "assistant"
+					? "Assistant: "
+					: "User: ";
+		lines.push(prefix);
+		blocks.push({ type: "text", text: prefix });
 		if (typeof message.content === "string") {
-			lines.push(prefix + message.content);
-			blocks.push({ type: "text", text: prefix + message.content });
+			lines.push(message.content);
+			blocks.push({ type: "text", text: message.content });
 			continue;
 		}
-		const text = message.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-		lines.push(prefix + text + suffix);
-		blocks.push({ type: "text", text: prefix });
 		for (const part of message.content) {
-			if (part.type === "text") blocks.push({ type: "text", text: part.text });
-			else if (part.type === "image") {
+			if (part.type === "text") {
+				lines.push(part.text);
+				blocks.push({ type: "text", text: part.text });
+			} else if (part.type === "toolCall") {
+				const call = `Pi tool call ${part.name} (${part.id}): ${JSON.stringify(part.arguments)}`;
+				lines.push(call);
+				blocks.push({ type: "text", text: call });
+			} else if (part.type === "image") {
 				hasImage = true;
 				if (!(["image/jpeg", "image/png", "image/gif", "image/webp"] as string[]).includes(part.mimeType)) {
 					throw new Error("Unsupported image media type for Claude SDK");
@@ -137,7 +144,8 @@ function sdkInput(messages: Message[]): SdkInput {
 				});
 			}
 		}
-		if (suffix) blocks.push({ type: "text", text: suffix });
+		lines.push("\n");
+		blocks.push({ type: "text", text: "\n" });
 	}
 	return hasImage ? blocks : lines.join("\n") || "Continue the active Pi work.";
 }
@@ -162,157 +170,47 @@ function emptyOutput(model: Model<Api>): AssistantMessage {
 	};
 }
 
-function failedCarrierResponse(message: Message, modelId: string): boolean {
-	return (
-		message.role === "assistant" &&
-		message.provider === API &&
-		message.model === modelId &&
-		message.stopReason === "error" &&
-		!message.responseId &&
-		message.content.length === 0
-	);
-}
-
 export class SdkCarrier {
 	private readonly observe?: (snapshot: SdkUsageSnapshot) => void;
 	private readonly queryFn: typeof query;
-	private cwd?: string;
-	private sessionKey?: string;
-	private resumeId?: string;
-	private thinking?: SimpleStreamOptions["reasoning"];
+	private readonly active = new Map<AbortController, Query>();
 	private deliveryHint?: string;
-
-	setDeliveryHint(hint: string | undefined): void {
-		this.deliveryHint = hint;
-	}
-
-	setSessionKey(id: string): void {
-		if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("Invalid Pi session ID for Claude SDK");
-		this.sessionKey = id;
-	}
+	private closed = false;
+	private turns = 0;
 
 	constructor(observe?: (snapshot: SdkUsageSnapshot) => void, queryFn: typeof query = query) {
 		this.observe = observe;
 		this.queryFn = queryFn;
 	}
-	private readonly abortController = new AbortController();
-	private client?: Query;
-	private activeModelId?: string;
-	private previous: Message[] = [];
-	private system?: string;
-	private catalog?: string;
-	private pendingInputs: Array<SdkInput | null> = [];
-	private wakeInput?: (value: SdkInput | null) => void;
-	private results: SDKResultMessage[] = [];
-	private waiting?: Awaiting;
-	private busy = false;
-	private closed = false;
-	private turns = 0;
 
-	isClosed(): boolean {
-		return this.closed;
+	setDeliveryHint(hint: string | undefined): void {
+		this.deliveryHint = hint;
 	}
 
-	private async *input(): AsyncGenerator<SDKUserMessage> {
-		while (true) {
-			const next = await new Promise<SdkInput | null>((resolve) => {
-				if (this.pendingInputs.length) resolve(this.pendingInputs.shift() ?? null);
-				else this.wakeInput = resolve;
-			});
-			if (next === null) return;
-			yield { type: "user", message: { role: "user", content: next }, parent_tool_use_id: null };
-		}
-	}
-
-	private send(text: SdkInput | null): void {
-		if (this.wakeInput) {
-			const wake = this.wakeInput;
-			this.wakeInput = undefined;
-			wake(text);
-		} else this.pendingInputs.push(text);
-	}
-
-	private start(model: Model<Api>, prompt: string, env: Record<string, string>): void {
-		this.activeModelId = model.id;
-		this.cwd = this.sessionKey
-			? join(tmpdir(), `pi-sdk-structured-${this.sessionKey}`)
-			: mkdtempSync(join(tmpdir(), "pi-sdk-structured-"));
-		mkdirSync(this.cwd, { recursive: true, mode: 0o700 });
-		this.client = this.queryFn({
-			prompt: this.input(),
-			options: {
-				cwd: this.cwd,
-				model: model.id,
-				systemPrompt: adaptPiPromptForClaudeSdk(prompt),
-				tools: [],
-				settingSources: [],
-				env,
-				persistSession: true,
-				...(this.resumeId ? { resume: this.resumeId } : {}),
-				thinking: this.thinking ? { type: "adaptive" } : { type: "disabled" },
-				...(this.thinking ? { effort: this.thinking === "minimal" ? "low" : this.thinking } : {}),
-				permissionMode: "dontAsk",
-				outputFormat: { type: "json_schema", schema: outputSchema },
-				// SDK tools are disabled; Pi accepts exactly one structured proposal per
-				// response. Do not impose prototype SDK turn/USD caps on a resident
-				// conversation: they terminate an unrelated Pi tool-result follow-up.
-				abortController: this.abortController,
-				pathToClaudeCodeExecutable: CLAUDE_CLI,
-			},
-		});
-		void (async () => {
-			try {
-				for await (const message of this.client!) {
-					if (message.type !== "result") continue;
-					const waiting = this.waiting;
-					this.waiting = undefined;
-					if (waiting) waiting.resolve(message);
-					else this.results.push(message);
-				}
-				if (!this.closed) this.close(new Error("SDK session ended unexpectedly"));
-			} catch (error) {
-				this.close(error instanceof Error ? error : new Error(String(error)));
-			}
-		})();
-	}
-
-	onModelSelect(model: { provider: string; id: string }): boolean {
-		if (this.activeModelId && (model.provider !== API || model.id !== this.activeModelId)) {
-			this.close(new Error("Pi model changed; start a new session before returning to Claude SDK"));
-			return true;
-		}
-		return false;
-	}
-
-	close(error = new Error("SDK session closed")): void {
-		if (this.closed) return;
+	close(): void {
 		this.closed = true;
-		this.waiting?.reject(error);
-		this.waiting = undefined;
-		this.results = [];
-		this.send(null);
-		this.abortController.abort();
-		this.client?.close();
-		if (this.cwd) rmSync(this.cwd, { recursive: true, force: true });
+		for (const [controller, client] of this.active) {
+			controller.abort();
+			client.close();
+		}
+		this.active.clear();
 	}
 
 	stream(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 		const stream = createAssistantMessageEventStream();
 		void (async () => {
 			const output = emptyOutput(model);
-			const auxiliarySummary = context.systemPrompt?.startsWith(PI_SUMMARIZATION_PREFIX) ?? false;
+			const controller = new AbortController();
+			const abort = () => controller.abort();
+			let client: Query | undefined;
+			let cwd: string | undefined;
 			try {
-				if (auxiliarySummary) {
+				if (this.closed) throw new Error("SDK carrier closed");
+				if (context.systemPrompt?.startsWith(PI_SUMMARIZATION_PREFIX))
 					throw new Error(
 						"Claude SDK carrier cannot summarize Pi history; switch to a supported model before compaction",
 					);
-				}
 				const env = sdkFirstPartyEnv();
-				if (this.closed || this.busy) throw new Error("SDK session unavailable");
-				if (this.client && this.activeModelId !== model.id)
-					throw new Error("Pi model changed; start a new session before using Claude SDK");
-				if (options?.signal?.aborted) throw new Error("Pi request aborted");
-				const originalSystem = context.systemPrompt ?? "";
 				const catalog = JSON.stringify(
 					context.tools?.map((tool) => ({
 						name: tool.name,
@@ -320,79 +218,8 @@ export class SdkCarrier {
 						parameters: tool.parameters,
 					})) ?? [],
 				);
-				const system = `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is a JSON object string, with final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. Pi tools: ${catalog}\n${originalSystem}`;
-				if (
-					this.client &&
-					(this.system !== system ||
-						this.catalog !== catalog ||
-						JSON.stringify(context.messages.slice(0, this.previous.length)) !== JSON.stringify(this.previous))
-				) {
-					throw new Error("Pi context or tool catalog changed; SDK session cannot be safely replayed");
-				}
-				if (!this.client && context.messages.length !== 1) {
-					let last = -1;
-					for (let index = context.messages.length - 1; index >= 0; index--) {
-						const message = context.messages[index];
-						if (
-							message.role === "assistant" &&
-							message.provider === API &&
-							message.model === model.id &&
-							message.stopReason !== "error" &&
-							message.stopReason !== "aborted" &&
-							message.responseId
-						) {
-							last = index;
-							break;
-						}
-					}
-					if (last < 0) {
-						// No Pi tool could have run without a committed SDK proposal.
-						// Restart the initial prompt only if the history is users and our
-						// empty failed responses, never an unknown assistant/tool result.
-						if (
-							!this.sessionKey ||
-							!context.messages.some((message) => failedCarrierResponse(message, model.id)) ||
-							context.messages.some(
-								(message) => message.role !== "user" && !failedCarrierResponse(message, model.id),
-							)
-						)
-							throw new Error("Claude SDK cannot resume this Pi session; start a new session");
-					} else {
-						const checkpoint = context.messages[last];
-						const match =
-							checkpoint?.role === "assistant"
-								? /^([0-9a-f-]{36})\.([0-9a-f]{64})$/i.exec(checkpoint.responseId ?? "")
-								: null;
-						if (
-							!match ||
-							!this.sessionKey ||
-							match[2] !== createHash("sha256").update(system).digest("hex") ||
-							context.messages.some(
-								(message) =>
-									message.role === "assistant" && (message.provider !== API || message.model !== model.id),
-							) ||
-							context.messages
-								.slice(last + 1)
-								.some((message) => message.role === "assistant" && !failedCarrierResponse(message, model.id))
-						)
-							throw new Error("Claude SDK cannot resume this Pi session; start a new session");
-						this.resumeId = match[1];
-						this.previous = context.messages.slice(0, last + 1);
-					}
-				}
-				const added = context.messages.slice(this.previous.length);
-				if (
-					added.some(
-						(message) => message.role === "assistant" && (message.provider !== API || message.model !== model.id),
-					)
-				) {
-					throw new Error(
-						"Pi context contains another model's response; start a new session before using Claude SDK",
-					);
-				}
-				const baseInput = sdkInput(added);
-				// A per-turn carrier note leaves the signed SDK system-prompt fingerprint
-				// unchanged, so existing Pi sessions can resume after a code rollout.
+				const system = `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is a JSON object string, with final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
+				const baseInput = sdkInput(context.messages);
 				const input: SdkInput = this.deliveryHint
 					? typeof baseInput === "string"
 						? `${baseInput}\n\n[Pi host capability] ${this.deliveryHint}`
@@ -404,39 +231,43 @@ export class SdkCarrier {
 				if (
 					JSON.stringify(payload) !== fingerprint ||
 					(transformed !== undefined && JSON.stringify(transformed) !== fingerprint)
-				) {
+				)
 					throw new Error("SDK prototype cannot apply provider payload mutations safely");
-				}
-				const abort = () => this.close(new Error("Pi request aborted"));
+				if (this.closed || options?.signal?.aborted) throw new Error("Pi request aborted");
 				options?.signal?.addEventListener("abort", abort, { once: true });
-				let result: SDKResultMessage;
-				try {
-					// onPayload is asynchronous: Pi may abort while it is pending.
-					if (options?.signal?.aborted) throw new Error("Pi request aborted");
-					this.busy = true;
-					this.system ??= system;
-					this.catalog ??= catalog;
-					if (!this.client) {
-						this.thinking = options?.reasoning;
-						this.start(model, system, env);
-					} else if (this.thinking !== options?.reasoning) {
-						await this.client.setMaxThinkingTokens(options?.reasoning ? 16384 : 0, "omitted");
-						if (options?.reasoning)
-							await this.client.applyFlagSettings({
-								effortLevel: options.reasoning === "minimal" ? "low" : options.reasoning,
-							});
-						this.thinking = options?.reasoning;
+				cwd = mkdtempSync(join(tmpdir(), "pi-sdk-structured-"));
+				const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+					yield { type: "user", message: { role: "user", content: input }, parent_tool_use_id: null };
+				})();
+				client = this.queryFn({
+					prompt,
+					options: {
+						cwd,
+						model: model.id,
+						systemPrompt: adaptPiPromptForClaudeSdk(system),
+						tools: [],
+						settingSources: [],
+						env,
+						persistSession: false,
+						thinking: options?.reasoning ? { type: "adaptive" } : { type: "disabled" },
+						...(options?.reasoning
+							? { effort: options.reasoning === "minimal" ? "low" : options.reasoning }
+							: {}),
+						permissionMode: "dontAsk",
+						outputFormat: { type: "json_schema", schema: outputSchema },
+						abortController: controller,
+						pathToClaudeCodeExecutable: CLAUDE_CLI,
+					},
+				});
+				this.active.set(controller, client);
+				let result: SDKResultMessage | undefined;
+				for await (const message of client) {
+					if (message.type === "result") {
+						result = message;
+						break;
 					}
-					const answer = new Promise<SDKResultMessage>((resolve, reject) => {
-						if (this.results.length) resolve(this.results.shift()!);
-						else this.waiting = { resolve, reject };
-					});
-					if (this.closed || options?.signal?.aborted) throw new Error("Pi request aborted");
-					this.send(input);
-					result = await answer;
-				} finally {
-					options?.signal?.removeEventListener("abort", abort);
 				}
+				if (!result) throw new Error("SDK session ended without a result");
 				this.turns++;
 				this.observe?.({
 					turn: this.turns,
@@ -464,20 +295,16 @@ export class SdkCarrier {
 						]),
 					),
 				});
-				if (result.subtype !== "success" || result.is_error) {
+				if (result.subtype !== "success" || result.is_error)
 					throw new Error(
 						`SDK turn failed: ${result.subtype}${result.subtype === "success" ? `: ${result.result}` : ""}`,
 					);
-				}
 				await options?.onResponse?.({ status: 200, headers: {} }, model);
 				const proposal = parseSdkProposal(result.structured_output, context);
 				output.content = proposal.name
 					? [{ type: "toolCall", id: randomUUID(), name: proposal.name, arguments: proposal.args! }]
 					: [{ type: "text", text: proposal.text ?? "" }];
 				output.stopReason = proposal.name ? "toolUse" : "stop";
-				if (this.sessionKey && result.session_id) {
-					output.responseId = `${result.session_id}.${createHash("sha256").update(system).digest("hex")}`;
-				}
 				const usage = result.usage;
 				output.usage = {
 					input: usage.input_tokens,
@@ -491,20 +318,19 @@ export class SdkCarrier {
 						(usage.cache_creation_input_tokens ?? 0),
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
-				this.previous = context.messages.slice();
 				stream.push({ type: "start", partial: output });
 				stream.push({ type: "done", reason: output.stopReason, message: output });
 				stream.end(output);
 			} catch (error) {
-				// Pi's auxiliary compaction and branch requests must not poison the
-				// resident main-chat SDK query when this unsupported operation fails.
-				if (!auxiliarySummary) this.close(error instanceof Error ? error : new Error(String(error)));
 				output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 				output.errorMessage = error instanceof Error ? error.message : String(error);
 				stream.push({ type: "error", reason: output.stopReason, error: output });
 				stream.end(output);
 			} finally {
-				this.busy = false;
+				options?.signal?.removeEventListener("abort", abort);
+				this.active.delete(controller);
+				client?.close();
+				if (cwd) rmSync(cwd, { recursive: true, force: true });
 			}
 		})();
 		return stream;
@@ -513,35 +339,15 @@ export class SdkCarrier {
 
 export function registerStructuredSdk(pi: ExtensionAPI, observe?: (snapshot: SdkUsageSnapshot) => void): () => void {
 	let carrier = new SdkCarrier(observe);
-	let sessionKey: string | undefined;
-	let deliveryHint: string | undefined;
-	let modelSwitchBlocked = false;
-	const freshCarrier = () => {
-		carrier = new SdkCarrier(observe);
-		if (sessionKey) carrier.setSessionKey(sessionKey);
-		carrier.setDeliveryHint(deliveryHint);
-	};
-	const stream = (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
-		// A failed SDK query closes only its carrier, not the Pi session. The
-		// next request resumes from the last committed proposal without rerunning
-		// any Pi tool; do not keep returning the same closed-carrier error.
-		if (carrier.isClosed() && sessionKey && !modelSwitchBlocked) freshCarrier();
-		return carrier.stream(model, context, options);
-	};
+	const stream = (model: Model<Api>, context: Context, options?: SimpleStreamOptions) =>
+		carrier.stream(model, context, options);
 	pi.on("session_shutdown", () => carrier.close());
-	pi.on("model_select", (event) => {
-		if (carrier.onModelSelect(event.model)) modelSwitchBlocked = true;
-	});
 	pi.on("session_start", (event, ctx) => {
 		if (event.reason !== "startup") {
 			carrier.close();
-			modelSwitchBlocked = false;
-			freshCarrier();
+			carrier = new SdkCarrier(observe);
 		}
-		sessionKey = ctx.sessionManager.getSessionId();
-		deliveryHint = discordAttachmentHint(ctx.sessionManager.getSessionFile());
-		carrier.setSessionKey(sessionKey);
-		carrier.setDeliveryHint(deliveryHint);
+		carrier.setDeliveryHint(discordAttachmentHint(ctx.sessionManager.getSessionFile()));
 	});
 	pi.registerProvider(
 		createProvider({

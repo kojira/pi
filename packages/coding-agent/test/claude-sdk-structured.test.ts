@@ -72,7 +72,6 @@ describe("Claude SDK structured Pi boundary", () => {
 			return Object.assign(iterator, { close: () => undefined });
 		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
 		const carrier = new SdkCarrier(undefined, fakeQuery);
-		carrier.setSessionKey("22222222-2222-4222-8222-222222222222");
 		carrier.setDeliveryHint(hint);
 		try {
 			const result = await carrier
@@ -95,13 +94,13 @@ describe("Claude SDK structured Pi boundary", () => {
 		}
 	});
 
-	it("passes Pi image tool results to the SDK and resumes a committed SDK session", async () => {
+	it("passes Pi history and image tool results to independent SDK requests", async () => {
 		const inputs: unknown[] = [];
-		const starts: Array<{ resume?: string; thinking?: unknown }> = [];
+		const starts: Array<{ resume?: string; thinking?: unknown; persistSession?: boolean }> = [];
 		const sessionId = "11111111-1111-4111-8111-111111111111";
 		const fakeQuery = ((request: {
 			prompt: AsyncIterable<{ message: { content: unknown } }>;
-			options: { resume?: string; thinking?: unknown };
+			options: { resume?: string; thinking?: unknown; persistSession?: boolean };
 		}) => {
 			starts.push(request.options);
 			const iterator = (async function* () {
@@ -143,22 +142,18 @@ describe("Claude SDK structured Pi boundary", () => {
 			],
 		} as Context["messages"][number];
 		const firstCarrier = new SdkCarrier(undefined, fakeQuery);
-		firstCarrier.setSessionKey("22222222-2222-4222-8222-222222222222");
 		try {
 			const first = await firstCarrier.stream(model, { systemPrompt: prompt, messages: [user] }).result();
-			expect(first.responseId).toContain(sessionId);
+			expect(first.responseId).toBeUndefined();
 			const second = await firstCarrier
 				.stream(model, { systemPrompt: prompt, messages: [user, first, image] }, { reasoning: "high" })
 				.result();
 			expect(second.stopReason).toBe("stop");
-			expect(inputs[1]).toEqual([
-				{ type: "text", text: "Pi tool result for read: " },
-				{ type: "text", text: "frame" },
-				{ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
-			]);
+			expect(JSON.stringify(inputs[1])).toContain("Assistant:");
+			expect(JSON.stringify(inputs[1])).toContain("Pi tool result for read");
+			expect(JSON.stringify(inputs[1])).toContain('"type":"image"');
 			firstCarrier.close();
 			const resumed = new SdkCarrier(undefined, fakeQuery);
-			resumed.setSessionKey("22222222-2222-4222-8222-222222222222");
 			try {
 				const third = await resumed
 					.stream(
@@ -177,13 +172,11 @@ describe("Claude SDK structured Pi boundary", () => {
 					)
 					.result();
 				expect(third.stopReason).toBe("stop");
-				expect(starts).toHaveLength(2);
-				expect(starts[0]?.resume).toBeUndefined();
-				expect(starts[1]?.resume).toBe(sessionId);
-				expect(starts[1]?.thinking).toEqual({ type: "adaptive" });
+				expect(starts).toHaveLength(3);
+				expect(starts.every((start) => start.resume === undefined && start.persistSession === false)).toBe(true);
+				expect(starts[2]?.thinking).toEqual({ type: "adaptive" });
 				resumed.close();
 				const recovered = new SdkCarrier(undefined, fakeQuery);
-				recovered.setSessionKey("22222222-2222-4222-8222-222222222222");
 				try {
 					const failed = {
 						...third,
@@ -215,7 +208,7 @@ describe("Claude SDK structured Pi boundary", () => {
 						)
 						.result();
 					expect(next.stopReason).toBe("stop");
-					expect(starts[2]?.resume).toBe(sessionId);
+					expect(starts[3]?.resume).toBeUndefined();
 					expect(JSON.stringify(inputs[3])).toContain('"type":"image"');
 					expect(JSON.stringify(inputs[3])).toContain("Still working?");
 				} finally {
@@ -229,7 +222,7 @@ describe("Claude SDK structured Pi boundary", () => {
 		}
 	});
 
-	it("restarts an initial SDK failure without replaying Pi tools or accepting unknown history", async () => {
+	it("uses Pi context after an initial SDK failure or a foreign assistant", async () => {
 		const inputs: unknown[] = [];
 		const fakeQuery = ((request: { prompt: AsyncIterable<{ message: { content: unknown } }> }) => {
 			const iterator = (async function* () {
@@ -251,7 +244,6 @@ describe("Claude SDK structured Pi boundary", () => {
 			return Object.assign(iterator, { close: () => undefined });
 		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
 		const carrier = new SdkCarrier(undefined, fakeQuery);
-		carrier.setSessionKey("22222222-2222-4222-8222-222222222222");
 		const model = {
 			api: "claude-sdk-structured",
 			provider: "claude-sdk-structured",
@@ -277,10 +269,10 @@ describe("Claude SDK structured Pi boundary", () => {
 			expect(JSON.stringify(inputs[0])).toContain("Try again");
 			const unknown = { ...failed, provider: "another-provider" };
 			const rejected = new SdkCarrier(undefined, fakeQuery);
-			rejected.setSessionKey("22222222-2222-4222-8222-222222222222");
 			try {
-				const error = await rejected.stream(model, { systemPrompt: prompt, messages: [user, unknown] }).result();
-				expect(error.stopReason).toBe("error");
+				const next = await rejected.stream(model, { systemPrompt: prompt, messages: [user, unknown] }).result();
+				expect(next.stopReason).toBe("stop");
+				expect(inputs).toHaveLength(2);
 			} finally {
 				rejected.close();
 			}
@@ -340,12 +332,7 @@ describe("Claude SDK structured Pi boundary", () => {
 				})
 				.result();
 			expect(second.content).toEqual([{ type: "text", text: "OK" }]);
-			expect(starts).toBe(1);
-			carrier.onModelSelect({ provider: "openai-codex", id: "gpt-5.5" });
-			carrier.onModelSelect({ provider: "claude-sdk-structured", id: "claude-opus-5-5" });
-			const afterSwitch = await carrier.stream(model, { systemPrompt: prompt, messages: [user] }).result();
-			expect(afterSwitch.stopReason).toBe("error");
-			expect(starts).toBe(1);
+			expect(starts).toBe(2);
 		} finally {
 			carrier.close();
 		}
@@ -401,11 +388,25 @@ describe("Claude SDK structured Pi boundary", () => {
 		}
 	});
 
-	it("rejects a resumed Pi transcript before issuing any SDK request", async () => {
-		let starts = 0;
-		const fakeQuery = (() => {
-			starts++;
-			throw new Error("No SDK query may run for a resumed Pi transcript");
+	it("uses an existing Pi transcript without an SDK resume ID", async () => {
+		let input: unknown;
+		const fakeQuery = ((request: { prompt: AsyncIterable<{ message: { content: unknown } }> }) => {
+			const iterator = (async function* () {
+				for await (const message of request.prompt) {
+					input = message.message.content;
+					yield {
+						type: "result",
+						subtype: "success",
+						is_error: false,
+						num_turns: 1,
+						total_cost_usd: 0,
+						usage: { input_tokens: 1, output_tokens: 1 },
+						modelUsage: {},
+						structured_output: { name: "", args_json: "", final: "OK" },
+					};
+				}
+			})();
+			return Object.assign(iterator, { close: () => undefined });
 		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
 		const carrier = new SdkCarrier(undefined, fakeQuery);
 		try {
@@ -423,20 +424,22 @@ describe("Claude SDK structured Pi boundary", () => {
 					] as Context["messages"],
 				})
 				.result();
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("cannot resume this Pi session");
-			expect(starts).toBe(0);
+			expect(result.stopReason).toBe("stop");
+			expect(input).toContain("Old task");
+			expect(input).toContain("New task");
 		} finally {
 			carrier.close();
 		}
 	});
 
-	it("rejects a foreign assistant reply even when the model selection event was missed", async () => {
+	it("uses a foreign assistant reply from Pi context after model selection", async () => {
 		let starts = 0;
-		const fakeQuery = ((request: { prompt: AsyncIterable<unknown> }) => {
+		const inputs: unknown[] = [];
+		const fakeQuery = ((request: { prompt: AsyncIterable<{ message: { content: unknown } }> }) => {
 			starts++;
 			const iterator = (async function* () {
-				for await (const _input of request.prompt) {
+				for await (const input of request.prompt) {
+					inputs.push(input.message.content);
 					yield {
 						type: "result",
 						subtype: "success",
@@ -466,16 +469,21 @@ describe("Claude SDK structured Pi boundary", () => {
 		try {
 			const first = await carrier.stream(model, { systemPrompt: prompt, messages: [user] }).result();
 			expect(first.stopReason).toBe("stop");
-			const foreign = { ...first, provider: "openai-codex", model: "gpt-5.5" };
+			const foreign = {
+				...first,
+				provider: "openai-codex",
+				model: "gpt-5.5",
+				content: [{ type: "text", text: "Earlier model reply" }],
+			};
 			const second = await carrier
 				.stream(model, {
 					systemPrompt: prompt,
 					messages: [user, first, foreign, { role: "user", content: "Next" }] as Context["messages"],
 				})
 				.result();
-			expect(second.stopReason).toBe("error");
-			expect(second.errorMessage).toContain("another model's response");
-			expect(starts).toBe(1);
+			expect(second.stopReason).toBe("stop");
+			expect(starts).toBe(2);
+			expect(JSON.stringify(inputs[1])).toContain("Earlier model reply");
 		} finally {
 			carrier.close();
 		}
