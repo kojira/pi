@@ -61,14 +61,11 @@ export type SdkUsageSnapshot = {
 	>;
 };
 
-/** Keep Pi identity, links, and instructions; avoid the reproducibly rejected documentation phrasing. */
+/** Preserve custom Pi prompts; adapt only known documentation phrases when present. */
 export function adaptPiPromptForClaudeSdk(prompt: string): string {
-	if (prompt.split(PACKAGE_REFERENCE).length !== 2 || prompt.split(WORK_REFERENCE).length !== 2) {
-		throw new Error("Pi documentation instructions changed; SDK prompt adapter must be reviewed before use");
-	}
 	return prompt
-		.replace(PACKAGE_REFERENCE, "app packages (docs/packages.md)")
-		.replace(
+		.replaceAll(PACKAGE_REFERENCE, "app packages (docs/packages.md)")
+		.replaceAll(
 			WORK_REFERENCE,
 			"- For Pi-related work, consult applicable documentation and examples and follow their linked Markdown pages before implementing.",
 		);

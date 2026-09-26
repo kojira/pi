@@ -534,11 +534,47 @@ describe("Claude SDK structured Pi boundary", () => {
 		expect(adapted).not.toContain("pi packages (docs/packages.md)");
 	});
 
-	it("fails closed if upstream Pi instructions change", () => {
-		expect(() => adaptPiPromptForClaudeSdk(prompt.replace("pi packages", "Pi packages"))).toThrow(
-			"Pi documentation instructions changed",
-		);
-		expect(() => adaptPiPromptForClaudeSdk(`${prompt}\n${prompt}`)).toThrow("Pi documentation instructions changed");
+	it("accepts a child reviewer prompt without the default Pi documentation lines", async () => {
+		const customPrompt = "You are a read-only reviewer. Review the assigned PRs.";
+		let sdkSystem: string | undefined;
+		const fakeQuery = ((request: { prompt: AsyncIterable<unknown>; options: { systemPrompt: string } }) => {
+			sdkSystem = request.options.systemPrompt;
+			const iterator = (async function* () {
+				for await (const _input of request.prompt) {
+					yield {
+						type: "result",
+						subtype: "success",
+						is_error: false,
+						num_turns: 1,
+						total_cost_usd: 0,
+						usage: { input_tokens: 1, output_tokens: 1 },
+						modelUsage: {},
+						structured_output: { name: "", args_json: "", final: "Review complete" },
+					};
+				}
+			})();
+			return Object.assign(iterator, { close: () => undefined });
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		try {
+			const model = {
+				api: "claude-sdk-structured",
+				provider: "claude-sdk-structured",
+				id: "claude-opus-5-5",
+			} as Model<string>;
+			const response = await carrier
+				.stream(model, {
+					systemPrompt: customPrompt,
+					messages: [{ role: "user", content: "Review PR #557" } as Context["messages"][number]],
+				})
+				.result();
+			expect(response.stopReason).toBe("stop");
+			expect(response.content).toEqual([{ type: "text", text: "Review complete" }]);
+			expect(sdkSystem).toContain(customPrompt);
+			expect(adaptPiPromptForClaudeSdk(customPrompt)).toBe(customPrompt);
+		} finally {
+			carrier.close();
+		}
 	});
 
 	it("accepts one tool proposal, returning data to Pi rather than executing it", () => {
