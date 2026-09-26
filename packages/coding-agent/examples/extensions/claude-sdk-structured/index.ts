@@ -206,10 +206,7 @@ export class SdkCarrier {
 			let cwd: string | undefined;
 			try {
 				if (this.closed) throw new Error("SDK carrier closed");
-				if (context.systemPrompt?.startsWith(PI_SUMMARIZATION_PREFIX))
-					throw new Error(
-						"Claude SDK carrier cannot summarize Pi history; switch to a supported model before compaction",
-					);
+				const summarizing = context.systemPrompt?.startsWith(PI_SUMMARIZATION_PREFIX) ?? false;
 				const env = sdkFirstPartyEnv();
 				const catalog = JSON.stringify(
 					context.tools?.map((tool) => ({
@@ -218,13 +215,16 @@ export class SdkCarrier {
 						parameters: tool.parameters,
 					})) ?? [],
 				);
-				const system = `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is a JSON object string, with final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
+				const system = summarizing
+					? `${context.systemPrompt}\nReturn the summary in the final field of the structured response; leave name and args_json empty.`
+					: `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is a JSON object string, with final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
 				const baseInput = sdkInput(context.messages);
-				const input: SdkInput = this.deliveryHint
-					? typeof baseInput === "string"
-						? `${baseInput}\n\n[Pi host capability] ${this.deliveryHint}`
-						: [...baseInput, { type: "text", text: `[Pi host capability] ${this.deliveryHint}` }]
-					: baseInput;
+				const input: SdkInput =
+					!summarizing && this.deliveryHint
+						? typeof baseInput === "string"
+							? `${baseInput}\n\n[Pi host capability] ${this.deliveryHint}`
+							: [...baseInput, { type: "text", text: `[Pi host capability] ${this.deliveryHint}` }]
+						: baseInput;
 				const payload = { systemPrompt: system, input, toolCatalog: catalog };
 				const fingerprint = JSON.stringify(payload);
 				const transformed = await options?.onPayload?.(payload, model);
@@ -244,7 +244,7 @@ export class SdkCarrier {
 					options: {
 						cwd,
 						model: model.id,
-						systemPrompt: adaptPiPromptForClaudeSdk(system),
+						systemPrompt: summarizing ? system : adaptPiPromptForClaudeSdk(system),
 						tools: [],
 						settingSources: [],
 						env,

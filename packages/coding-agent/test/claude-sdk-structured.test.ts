@@ -9,6 +9,7 @@ import {
 	SdkCarrier,
 	sdkFirstPartyEnv,
 } from "../examples/extensions/claude-sdk-structured/index.ts";
+import { generateSummaryWithUsage } from "../src/core/compaction/compaction.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const prompt = [
@@ -281,10 +282,12 @@ describe("Claude SDK structured Pi boundary", () => {
 		}
 	});
 
-	it("rejects auxiliary Pi summaries without poisoning an active SDK conversation", async () => {
+	it("uses Pi's compaction summary path without interrupting normal turns", async () => {
 		let starts = 0;
-		const fakeQuery = ((request: { prompt: AsyncIterable<unknown> }) => {
+		const systems: string[] = [];
+		const fakeQuery = ((request: { prompt: AsyncIterable<unknown>; options: { systemPrompt: string } }) => {
 			starts++;
+			systems.push(request.options.systemPrompt);
 			const iterator = (async function* () {
 				for await (const _input of request.prompt) {
 					yield {
@@ -293,14 +296,15 @@ describe("Claude SDK structured Pi boundary", () => {
 						is_error: false,
 						num_turns: 1,
 						total_cost_usd: 0,
-						usage: {
-							input_tokens: 1,
-							output_tokens: 1,
-							cache_creation_input_tokens: 0,
-							cache_read_input_tokens: 0,
-						},
+						usage: { input_tokens: 1, output_tokens: 1 },
 						modelUsage: {},
-						structured_output: { name: "", args_json: "", final: "OK" },
+						structured_output: {
+							name: "",
+							args_json: "",
+							final: request.options.systemPrompt.startsWith("You are a context summarization assistant.")
+								? "## Goal\n- Continue the task"
+								: "OK",
+						},
 					};
 				}
 			})();
@@ -318,13 +322,23 @@ describe("Claude SDK structured Pi boundary", () => {
 			messages: [user],
 		};
 		try {
-			const before = await carrier.stream(model, summary).result();
-			expect(before.stopReason).toBe("error");
-			expect(starts).toBe(0);
+			const before = await generateSummaryWithUsage(
+				[{ role: "user", content: "First task", timestamp: Date.now() }],
+				model,
+				16384,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(m, c, o) => carrier.stream(m, c, o),
+			);
+			expect(before.text).toBe("## Goal\n- Continue the task");
 			const first = await carrier.stream(model, { systemPrompt: prompt, messages: [user] }).result();
 			expect(first.content).toEqual([{ type: "text", text: "OK" }]);
 			const during = await carrier.stream(model, summary).result();
-			expect(during.stopReason).toBe("error");
+			expect(during.content).toEqual([{ type: "text", text: "## Goal\n- Continue the task" }]);
 			const second = await carrier
 				.stream(model, {
 					systemPrompt: prompt,
@@ -332,7 +346,9 @@ describe("Claude SDK structured Pi boundary", () => {
 				})
 				.result();
 			expect(second.content).toEqual([{ type: "text", text: "OK" }]);
-			expect(starts).toBe(2);
+			expect(starts).toBe(4);
+			expect(systems[0]).toContain("final field");
+			expect(systems[2]).toContain("final field");
 		} finally {
 			carrier.close();
 		}
