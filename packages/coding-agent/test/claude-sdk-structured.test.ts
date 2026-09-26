@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
 	discordAttachmentHint,
-	parseSdkProposal,
+	parseSdkToolProposal,
 	registerStructuredSdk,
 	SdkCarrier,
 	sdkFirstPartyEnv,
@@ -285,9 +285,14 @@ describe("Claude SDK structured Pi boundary", () => {
 	it("uses Pi's compaction summary path without interrupting normal turns", async () => {
 		let starts = 0;
 		const systems: string[] = [];
-		const fakeQuery = ((request: { prompt: AsyncIterable<unknown>; options: { systemPrompt: string } }) => {
+		const servers: unknown[] = [];
+		const fakeQuery = ((request: {
+			prompt: AsyncIterable<unknown>;
+			options: { systemPrompt: string; mcpServers?: unknown };
+		}) => {
 			starts++;
 			systems.push(request.options.systemPrompt);
+			servers.push(request.options.mcpServers);
 			const iterator = (async function* () {
 				for await (const _input of request.prompt) {
 					yield {
@@ -349,6 +354,10 @@ describe("Claude SDK structured Pi boundary", () => {
 			expect(starts).toBe(4);
 			expect(systems[0]).toContain("final field");
 			expect(systems[2]).toContain("final field");
+			expect(servers[0]).toBeUndefined();
+			expect(servers[2]).toBeUndefined();
+			expect(servers[1]).toHaveProperty("pi_proposals");
+			expect(servers[3]).toHaveProperty("pi_proposals");
 		} finally {
 			carrier.close();
 		}
@@ -575,157 +584,165 @@ describe("Claude SDK structured Pi boundary", () => {
 		}
 	});
 
-	it("accepts one tool proposal, returning data to Pi rather than executing it", () => {
-		expect(parseSdkProposal({ name: "side_effect", args_json: '{"value":"OK"}', final: "" }, context)).toEqual({
-			name: "side_effect",
-			args: { value: "OK" },
-		});
-		expect(parseSdkProposal({ name: "", args_json: "", final: "Progress update" }, context)).toEqual({
-			text: "Progress update",
-		});
-	});
-
-	it("escapes literal controls inside SDK tool JSON strings without changing the Pi tool value", () => {
-		const literal = '{"value":"first\nsecond\tthird"}';
-		const escaped = '{"value":"first\\nsecond\\tthird"}';
-		const expected = { name: "side_effect", args: { value: "first\nsecond\tthird" } };
-		expect(() => JSON.parse(literal)).toThrow();
-		expect(parseSdkProposal({ name: "side_effect", args_json: literal, final: "" }, context)).toEqual(expected);
-		expect(parseSdkProposal({ name: "side_effect", args_json: escaped, final: "" }, context)).toEqual(expected);
-		expect(() =>
-			parseSdkProposal({ name: "side_effect", args_json: '{"value":"first\nsecond",}', final: "" }, context),
-		).toThrow();
+	it("passes native SDK object arguments to Pi without JSON-string parsing", () => {
+		const args = { value: 'first\nsecond\t"third"', nested: { note: "preserved" } };
+		expect(parseSdkToolProposal({ name: "side_effect", args }, context)).toEqual({ name: "side_effect", args });
 	});
 
 	it.each([
-		{ name: "finish_work", args_json: "{}", final: "Also finish in prose" },
-		{ name: "unknown", args_json: "{}", final: "" },
-		{ name: "", args_json: "{}", final: "" },
-		{ name: "", args_json: "", final: "" },
-		{ name: "side_effect", args_json: "[]", final: "" },
-		{ name: "side_effect", args_json: "not JSON", final: "" },
-	])("rejects invalid or contradictory proposal before Pi dispatch: $name/$final", (proposal) => {
-		expect(() => parseSdkProposal(proposal, context)).toThrow();
+		{ name: "unknown", args: {} },
+		{ name: "", args: {} },
+		{ name: "side_effect", args: [] },
+		{ name: "side_effect", args: "not an object" },
+		{ name: "side_effect", args: null },
+		{ name: "side_effect", args_json: '{"value":"x"}' },
+	])("rejects an invalid native SDK proposal before Pi dispatch: $name", (proposal) => {
+		expect(() => parseSdkToolProposal(proposal, context)).toThrow();
 	});
 
 	it.each([
-		{
-			responses: [
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "Premature completion" },
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "" },
-			],
-			reason: "toolUse",
-		},
-		{
-			responses: [
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "Premature completion" },
-				{ name: "", args_json: "", final: "Only text" },
-			],
-			reason: "stop",
-		},
-		{
-			responses: [
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "Premature completion" },
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "Still premature" },
-			],
-			reason: "error",
-		},
-		{
-			responses: [
-				{ name: "side_effect", args_json: '{"value":"x" "extra":"y"}', final: "" },
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "" },
-			],
-			reason: "toolUse",
-		},
-		{
-			responses: [
-				{ name: "side_effect", args_json: '{"value":"x",}', final: "" },
-				{ name: "", args_json: "", final: "Only text" },
-			],
-			reason: "stop",
-		},
-		{
-			responses: [
-				{ name: "side_effect", args_json: "[]", final: "" },
-				{ name: "side_effect", args_json: '{"value":"x"}', final: "" },
-			],
-			reason: "toolUse",
-		},
-		{
-			responses: [
-				{ name: "side_effect", args_json: '{"value":"x" "extra":"y"}', final: "" },
-				{ name: "side_effect", args_json: '{"value":"x",}', final: "" },
-			],
-			reason: "error",
-		},
-		{
-			responses: [{ name: "unknown", args_json: "{}", final: "" }],
-			reason: "error",
-		},
-	])("retries malformed SDK proposals before Pi dispatch: $reason/$responses", async ({ responses, reason }) => {
-		const requests: Array<{ input: unknown; resume?: string; persistSession?: boolean; abortedAtStart: boolean }> =
-			[];
+		{ input: { name: "side_effect", args: { value: 'first\nsecond\t"third"' } }, reason: "toolUse" },
+		{ input: { name: "unknown", args: {} }, reason: "error" },
+		{ input: { name: "side_effect", args: [] }, reason: "error" },
+	])("intercepts a native SDK tool proposal before SDK handler or Pi dispatch: $reason", async ({ input, reason }) => {
+		const requests: Array<{ resume?: string; persistSession?: boolean; proposalServer?: unknown }> = [];
 		let closed = 0;
+		let sdkContinued = false;
 		const fakeQuery = ((request: {
-			prompt: AsyncIterable<{ message: { content: unknown } }>;
-			options: { resume?: string; persistSession?: boolean; abortController: AbortController };
+			prompt: AsyncIterable<unknown>;
+			options: { resume?: string; persistSession?: boolean; mcpServers?: unknown };
 		}) => {
-			const reply = responses[requests.length];
 			const iterator = (async function* () {
-				for await (const message of request.prompt) {
+				for await (const _prompt of request.prompt) {
 					requests.push({
-						input: message.message.content,
-						...request.options,
-						abortedAtStart: request.options.abortController.signal.aborted,
+						resume: request.options.resume,
+						persistSession: request.options.persistSession,
+						proposalServer: request.options.mcpServers,
 					});
 					yield {
-						type: "result",
-						subtype: "success",
-						is_error: false,
-						num_turns: 1,
-						total_cost_usd: 0,
-						usage: { input_tokens: 3, output_tokens: 2 },
-						modelUsage: {},
-						structured_output: reply,
+						type: "assistant",
+						parent_tool_use_id: null,
+						message: {
+							content: [{ type: "tool_use", name: "mcp__pi_proposals__propose_pi_tool", input }],
+							usage: { input_tokens: 3, output_tokens: 2 },
+						},
 					};
+					sdkContinued = true;
 				}
 			})();
 			return Object.assign(iterator, {
 				close: () => {
 					closed++;
-					request.options.abortController.abort();
 				},
 			});
 		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
 		const carrier = new SdkCarrier(undefined, fakeQuery);
 		try {
-			const model = {
-				api: "claude-sdk-structured",
-				provider: "claude-sdk-structured",
-				id: "claude-opus-5-5",
-			} as Model<string>;
 			const reply = await carrier
-				.stream(model, {
-					systemPrompt: "You are a read-only child reviewer.",
-					messages: [{ role: "user", content: "Review safely" } as Context["messages"][number]],
-					tools: context.tools,
-				})
+				.stream(
+					{
+						api: "claude-sdk-structured",
+						provider: "claude-sdk-structured",
+						id: "claude-opus-5-5",
+					} as Model<string>,
+					{
+						systemPrompt: "You are a read-only child reviewer.",
+						messages: [{ role: "user", content: "Review safely" } as Context["messages"][number]],
+						tools: context.tools,
+					},
+				)
 				.result();
 			expect(reply.stopReason).toBe(reason);
-			expect(requests).toHaveLength(responses.length);
-			expect(
-				requests.every(
-					(request) => request.resume === undefined && request.persistSession === false && !request.abortedAtStart,
-				),
-			).toBe(true);
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.resume).toBeUndefined();
+			expect(requests[0]?.persistSession).toBe(false);
+			expect(requests[0]?.proposalServer).toHaveProperty("pi_proposals");
 			expect(reply.content.filter((block) => block.type === "toolCall")).toHaveLength(reason === "toolUse" ? 1 : 0);
-			expect(reply.usage.input).toBe(3 * responses.length);
-			if (responses.length === 2) expect(JSON.stringify(requests[1]?.input)).toContain("before any Pi tool ran");
-			if (reason === "error")
-				expect(reply.errorMessage).toMatch(/Tool and final text|Unknown proposed Pi tool|Expected|Unexpected/);
+			if (reason === "toolUse") {
+				expect(reply.content[0]).toMatchObject({ name: "side_effect", arguments: input.args });
+				expect(reply.usage.input).toBe(3);
+			} else expect(reply.errorMessage).toMatch(/Unknown proposed Pi tool|Tool arguments must be an object/);
+			expect(sdkContinued).toBe(false);
 		} finally {
 			carrier.close();
 		}
-		expect(closed).toBe(responses.length);
+		expect(closed).toBeGreaterThan(0);
+	});
+
+	it("rejects mixed tool and final text in one SDK assistant message", async () => {
+		const fakeQuery = ((request: { prompt: AsyncIterable<unknown> }) => {
+			const iterator = (async function* () {
+				for await (const _prompt of request.prompt)
+					yield {
+						type: "assistant",
+						parent_tool_use_id: null,
+						message: {
+							usage: { input_tokens: 1, output_tokens: 1 },
+							content: [
+								{ type: "text", text: "Premature completion" },
+								{
+									type: "tool_use",
+									name: "mcp__pi_proposals__propose_pi_tool",
+									input: { name: "side_effect", args: { value: "x" } },
+								},
+							],
+						},
+					};
+			})();
+			return Object.assign(iterator, { close: () => undefined });
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		try {
+			const reply = await carrier
+				.stream(
+					{
+						api: "claude-sdk-structured",
+						provider: "claude-sdk-structured",
+						id: "claude-opus-5-5",
+					} as Model<string>,
+					{ systemPrompt: prompt, messages: [], tools: context.tools },
+				)
+				.result();
+			expect(reply.stopReason).toBe("error");
+			expect(reply.errorMessage).toContain("mixed tool and final text");
+			expect(reply.content).toHaveLength(0);
+		} finally {
+			carrier.close();
+		}
+	});
+
+	it("fails closed if the SDK attempts an ambient tool instead of a Pi proposal", async () => {
+		const fakeQuery = ((request: { prompt: AsyncIterable<unknown> }) => {
+			const iterator = (async function* () {
+				for await (const _prompt of request.prompt)
+					yield {
+						type: "assistant",
+						parent_tool_use_id: null,
+						message: {
+							usage: { input_tokens: 1, output_tokens: 1 },
+							content: [{ type: "tool_use", name: "mcp__claude_ai_Google_Drive__read_file_content", input: {} }],
+						},
+					};
+			})();
+			return Object.assign(iterator, { close: () => undefined });
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		try {
+			const reply = await carrier
+				.stream(
+					{
+						api: "claude-sdk-structured",
+						provider: "claude-sdk-structured",
+						id: "claude-opus-5-5",
+					} as Model<string>,
+					{ systemPrompt: prompt, messages: [], tools: context.tools },
+				)
+				.result();
+			expect(reply.stopReason).toBe("error");
+			expect(reply.errorMessage).toContain("unapproved tool");
+			expect(reply.content).toHaveLength(0);
+		} finally {
+			carrier.close();
+		}
 	});
 });
