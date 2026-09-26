@@ -6,7 +6,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { type Query, query, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+	createSdkMcpServer,
+	type Query,
+	query,
+	type SDKResultMessage,
+	type SDKUserMessage,
+	tool,
+} from "@anthropic-ai/claude-agent-sdk";
 import {
 	type Api,
 	type AssistantMessage,
@@ -19,6 +26,7 @@ import {
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
 const API = "claude-sdk-structured";
@@ -38,20 +46,29 @@ export function sdkFirstPartyEnv(source: NodeJS.ProcessEnv = process.env): Recor
 const PI_SUMMARIZATION_PREFIX = "You are a context summarization assistant.";
 const outputSchema = {
 	type: "object",
-	properties: {
-		name: { type: "string" },
-		args_json: {
-			type: "string",
-			description:
-				"When name is set, one valid JSON object string with quoted keys and escaped string contents; otherwise empty.",
-		},
-		final: { type: "string" },
-	},
-	required: ["name", "args_json", "final"],
+	properties: { final: { type: "string" } },
+	required: ["final"],
 	additionalProperties: false,
 } as const;
+const PROPOSAL_MCP_NAME = "mcp__pi_proposals__propose_pi_tool";
 
-type Proposal = { name: string; args_json: string; final: string };
+/** This SDK MCP tool transports an object proposal; it never executes a Pi tool. */
+function proposalServer() {
+	return createSdkMcpServer({
+		name: "pi_proposals",
+		version: "1.0.0",
+		alwaysLoad: true,
+		tools: [
+			tool(
+				"propose_pi_tool",
+				"Propose one Pi tool call for validation and later execution by the Pi host. This tool performs no action.",
+				{ name: z.string(), args: z.object({}).passthrough() },
+				async () => ({ content: [{ type: "text", text: "Proposal recorded; Pi has not executed it." }] }),
+				{ alwaysLoad: true },
+			),
+		],
+	});
+}
 
 /** Numeric-only evidence. SDK modelUsage is cumulative; usage is per main-agent turn. */
 export type SdkUsageSnapshot = {
@@ -66,58 +83,18 @@ export type SdkUsageSnapshot = {
 	>;
 };
 
-/** Preserve literal control characters in JSON string values as escaped JSON, without changing their decoded value. */
-function escapeJsonStringControls(raw: string): string {
-	let quoted = false;
-	let escaped = false;
-	let normalized = "";
-	for (const char of raw) {
-		if (escaped) {
-			normalized += char;
-			escaped = false;
-		} else if (quoted && char === "\\") {
-			normalized += char;
-			escaped = true;
-		} else if (char === '"') {
-			normalized += char;
-			quoted = !quoted;
-		} else if (quoted && char.charCodeAt(0) < 0x20) {
-			normalized += `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`;
-		} else {
-			normalized += char;
-		}
-	}
-	return normalized;
-}
-
-/** Parse the complete proposal before exposing any call to Pi's existing batch and policy checks. */
-export function parseSdkProposal(
+/** Validate a native SDK tool-use object before exposing it to Pi's dispatcher. */
+export function parseSdkToolProposal(
 	value: unknown,
 	context: Context,
-): { name?: string; args?: Record<string, unknown>; text?: string } {
-	if (!value || typeof value !== "object") throw new Error("SDK did not return a proposal");
-	const { name, args_json, final } = value as Partial<Proposal>;
-	if (typeof name !== "string" || typeof args_json !== "string" || typeof final !== "string") {
-		throw new Error("Invalid SDK proposal fields");
-	}
-	const toolName = name.trim();
-	if (!toolName) {
-		if (args_json.trim()) throw new Error("Tool arguments without a tool name");
-		if (!final.trim()) throw new Error("Empty SDK response would cause a repeated Pi turn");
-		return { text: final };
-	}
-	if (!context.tools?.some((tool) => tool.name === toolName)) throw new Error("Unknown proposed Pi tool");
-	if (final.trim()) throw new Error("Tool and final text cannot be proposed in the same turn");
-	let args: unknown;
-	try {
-		args = JSON.parse(args_json);
-	} catch (error) {
-		const normalized = escapeJsonStringControls(args_json);
-		if (normalized === args_json) throw error;
-		args = JSON.parse(normalized);
+): { name: string; args: Record<string, unknown> } {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid SDK tool proposal");
+	const { name, args } = value as { name?: unknown; args?: unknown };
+	if (typeof name !== "string" || !context.tools?.some((piTool) => piTool.name === name)) {
+		throw new Error("Unknown proposed Pi tool");
 	}
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Tool arguments must be an object");
-	return { name: toolName, args: args as Record<string, unknown> };
+	return { name, args: args as Record<string, unknown> };
 }
 
 type SdkInput = SDKUserMessage["message"]["content"];
@@ -223,7 +200,7 @@ export class SdkCarrier {
 		const stream = createAssistantMessageEventStream();
 		void (async () => {
 			const output = emptyOutput(model);
-			let controller = new AbortController();
+			const controller = new AbortController();
 			const abort = () => controller.abort();
 			let client: Query | undefined;
 			let cwd: string | undefined;
@@ -239,8 +216,8 @@ export class SdkCarrier {
 					})) ?? [],
 				);
 				const system = summarizing
-					? `${context.systemPrompt}\nReturn the summary in the final field of the structured response; leave name and args_json empty.`
-					: `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is one valid JSON object string with quoted keys, escaped quotes and control characters, and no trailing commas; leave final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
+					? `${context.systemPrompt}\nReturn the summary in the final field of the structured response.`
+					: `You are the Pi model, not a tool executor. If a Pi tool must run, call only propose_pi_tool with its exact Pi tool name and args as a JSON object, not a JSON string. This call merely proposes an action; Pi validates and executes it after your SDK turn closes. Do not put tool arguments or a claimed tool result in final. For ordinary prose, return the final structured response without calling a tool. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
 				const baseInput = sdkInput(context.messages);
 				const input: SdkInput =
 					!summarizing && this.deliveryHint
@@ -259,51 +236,91 @@ export class SdkCarrier {
 				if (this.closed || options?.signal?.aborted) throw new Error("Pi request aborted");
 				options?.signal?.addEventListener("abort", abort, { once: true });
 				cwd = mkdtempSync(join(tmpdir(), "pi-sdk-structured-"));
-				let proposal: ReturnType<typeof parseSdkProposal> | undefined;
-				for (let attempt = 0; attempt < 2; attempt++) {
-					if (this.closed || options?.signal?.aborted || controller.signal.aborted)
-						throw new Error("Pi request aborted");
-					// A malformed proposal never reached Pi. One fresh SDK request may correct its format.
-					const correction =
-						"Your previous structured response was discarded before any Pi tool ran. Return exactly one allowed Pi tool name with args_json as one syntactically valid JSON object string (quoted keys, escaped quotes and control characters, no trailing commas) and final empty; or empty name and args_json with nonempty final text.";
-					const retryInput: SdkInput =
-						attempt === 0
-							? input
-							: typeof input === "string"
-								? `${input}\n\n${correction}`
-								: [...input, { type: "text", text: correction }];
-					const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
-						yield { type: "user", message: { role: "user", content: retryInput }, parent_tool_use_id: null };
-					})();
-					client = this.queryFn({
-						prompt,
-						options: {
-							cwd,
-							model: model.id,
-							systemPrompt: system,
-							tools: [],
-							settingSources: [],
-							env,
-							persistSession: false,
-							thinking: options?.reasoning ? { type: "adaptive" } : { type: "disabled" },
-							...(options?.reasoning
-								? { effort: options.reasoning === "minimal" ? "low" : options.reasoning }
-								: {}),
-							permissionMode: "dontAsk",
-							outputFormat: { type: "json_schema", schema: outputSchema },
-							abortController: controller,
-							pathToClaudeCodeExecutable: CLAUDE_CLI,
-						},
-					});
-					this.active.set(controller, client);
-					let result: SDKResultMessage | undefined;
-					for await (const message of client) {
-						if (message.type === "result") {
-							result = message;
+				const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+					yield { type: "user", message: { role: "user", content: input }, parent_tool_use_id: null };
+				})();
+				client = this.queryFn({
+					prompt,
+					options: {
+						cwd,
+						model: model.id,
+						systemPrompt: system,
+						tools: [],
+						...(summarizing
+							? {}
+							: { mcpServers: { pi_proposals: proposalServer() }, allowedTools: [PROPOSAL_MCP_NAME] }),
+						settingSources: [],
+						env,
+						persistSession: false,
+						thinking: options?.reasoning ? { type: "adaptive" } : { type: "disabled" },
+						...(options?.reasoning
+							? { effort: options.reasoning === "minimal" ? "low" : options.reasoning }
+							: {}),
+						permissionMode: "dontAsk",
+						outputFormat: { type: "json_schema", schema: outputSchema },
+						abortController: controller,
+						pathToClaudeCodeExecutable: CLAUDE_CLI,
+					},
+				});
+				this.active.set(controller, client);
+				let result: SDKResultMessage | undefined;
+				let proposal: ReturnType<typeof parseSdkToolProposal> | undefined;
+				let priorText = false;
+				for await (const message of client) {
+					if (message.type === "assistant" && !message.parent_tool_use_id) {
+						if (message.error) throw new Error(`SDK assistant error: ${message.error}`);
+						const tools = message.message.content.filter((block) => block.type === "tool_use");
+						const proposed = tools.filter((block) => block.name === PROPOSAL_MCP_NAME);
+						if (proposed.length) {
+							if (
+								summarizing ||
+								proposed.length !== 1 ||
+								tools.length !== 1 ||
+								priorText ||
+								message.message.content.some((block) => block.type === "text" && block.text.trim())
+							) {
+								throw new Error("SDK proposed multiple tools or mixed tool and final text");
+							}
+							proposal = parseSdkToolProposal(proposed[0].input, context);
+							const usage = message.message.usage;
+							this.turns++;
+							this.observe?.({
+								turn: this.turns,
+								status: "tool_proposal",
+								modelTurns: 1,
+								estimatedCostUsd: 0,
+								usage: {
+									input: usage.input_tokens,
+									output: usage.output_tokens,
+									write: usage.cache_creation_input_tokens ?? 0,
+									read: usage.cache_read_input_tokens ?? 0,
+									oneHourWrite: usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+									fiveMinuteWrite: usage.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+								},
+								modelTotals: {},
+							});
+							output.usage.input = usage.input_tokens;
+							output.usage.output = usage.output_tokens;
+							output.usage.cacheRead = usage.cache_read_input_tokens ?? 0;
+							output.usage.cacheWrite = usage.cache_creation_input_tokens ?? 0;
+							output.usage.totalTokens =
+								output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+							client.close();
 							break;
 						}
+						if (tools.some((block) => block.name !== "StructuredOutput"))
+							throw new Error("SDK attempted an unapproved tool instead of a Pi proposal");
+						if (message.message.content.some((block) => block.type === "text" && block.text.trim()))
+							priorText = true;
 					}
-					if (!result) throw new Error("SDK session ended without a result");
+					if (message.type === "result") {
+						result = message;
+						break;
+					}
+				}
+				if (this.closed || options?.signal?.aborted) throw new Error("Pi request aborted");
+				if (!proposal) {
+					if (!result) throw new Error("SDK session ended without a result or Pi tool proposal");
 					this.turns++;
 					this.observe?.({
 						turn: this.turns,
@@ -332,44 +349,26 @@ export class SdkCarrier {
 						),
 					});
 					const usage = result.usage;
-					output.usage.input += usage.input_tokens;
-					output.usage.output += usage.output_tokens;
-					output.usage.cacheRead += usage.cache_read_input_tokens ?? 0;
-					output.usage.cacheWrite += usage.cache_creation_input_tokens ?? 0;
+					output.usage.input = usage.input_tokens;
+					output.usage.output = usage.output_tokens;
+					output.usage.cacheRead = usage.cache_read_input_tokens ?? 0;
+					output.usage.cacheWrite = usage.cache_creation_input_tokens ?? 0;
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					if (result.subtype !== "success" || result.is_error)
 						throw new Error(
 							`SDK turn failed: ${result.subtype}${result.subtype === "success" ? `: ${result.result}` : ""}`,
 						);
-					try {
-						proposal = parseSdkProposal(result.structured_output, context);
-					} catch (error) {
-						if (
-							attempt !== 0 ||
-							(!(error instanceof SyntaxError) &&
-								!(
-									error instanceof Error &&
-									[
-										"Tool and final text cannot be proposed in the same turn",
-										"Tool arguments must be an object",
-									].includes(error.message)
-								))
-						)
-							throw error;
-						client.close();
-						this.active.delete(controller);
-						controller = new AbortController();
-						continue;
-					}
-					break;
+					const final = (result.structured_output as { final?: unknown } | undefined)?.final;
+					if (typeof final !== "string" || !final.trim())
+						throw new Error("Empty SDK response would cause a repeated Pi turn");
+					output.content = [{ type: "text", text: final }];
+					output.stopReason = "stop";
+				} else {
+					output.content = [{ type: "toolCall", id: randomUUID(), name: proposal.name, arguments: proposal.args }];
+					output.stopReason = "toolUse";
 				}
-				if (!proposal) throw new Error("SDK did not return a valid proposal");
 				await options?.onResponse?.({ status: 200, headers: {} }, model);
-				output.content = proposal.name
-					? [{ type: "toolCall", id: randomUUID(), name: proposal.name, arguments: proposal.args! }]
-					: [{ type: "text", text: proposal.text ?? "" }];
-				output.stopReason = proposal.name ? "toolUse" : "stop";
 				stream.push({ type: "start", partial: output });
 				stream.push({ type: "done", reason: output.stopReason, message: output });
 				stream.end(output);
