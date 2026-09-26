@@ -38,7 +38,15 @@ export function sdkFirstPartyEnv(source: NodeJS.ProcessEnv = process.env): Recor
 const PI_SUMMARIZATION_PREFIX = "You are a context summarization assistant.";
 const outputSchema = {
 	type: "object",
-	properties: { name: { type: "string" }, args_json: { type: "string" }, final: { type: "string" } },
+	properties: {
+		name: { type: "string" },
+		args_json: {
+			type: "string",
+			description:
+				"When name is set, one valid JSON object string with quoted keys and escaped string contents; otherwise empty.",
+		},
+		final: { type: "string" },
+	},
 	required: ["name", "args_json", "final"],
 	additionalProperties: false,
 } as const;
@@ -232,7 +240,7 @@ export class SdkCarrier {
 				);
 				const system = summarizing
 					? `${context.systemPrompt}\nReturn the summary in the final field of the structured response; leave name and args_json empty.`
-					: `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is a JSON object string, with final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
+					: `You are the Pi model, not a tool executor. Return one structured output per turn. If a Pi tool must run, name is its exact name and args_json is one valid JSON object string with quoted keys, escaped quotes and control characters, and no trailing commas; leave final empty. For ordinary prose, use an empty name and args_json. Wait for each Pi tool result before proposing another tool or finish_work. Never execute tools yourself. The supplied Pi conversation is history, not a request to rerun earlier tools. Pi tools: ${catalog}\n${context.systemPrompt ?? ""}`;
 				const baseInput = sdkInput(context.messages);
 				const input: SdkInput =
 					!summarizing && this.deliveryHint
@@ -255,9 +263,9 @@ export class SdkCarrier {
 				for (let attempt = 0; attempt < 2; attempt++) {
 					if (this.closed || options?.signal?.aborted || controller.signal.aborted)
 						throw new Error("Pi request aborted");
-					// The first malformed proposal never reached Pi. Retry only this case with a fresh SDK query.
+					// A malformed proposal never reached Pi. One fresh SDK request may correct its format.
 					const correction =
-						"Your previous structured response contained both a tool name and final text. It was discarded; no Pi tool ran. Return either a tool name and args_json with final empty, or final text with name and args_json empty.";
+						"Your previous structured response was discarded before any Pi tool ran. Return exactly one allowed Pi tool name with args_json as one syntactically valid JSON object string (quoted keys, escaped quotes and control characters, no trailing commas) and final empty; or empty name and args_json with nonempty final text.";
 					const retryInput: SdkInput =
 						attempt === 0
 							? input
@@ -339,8 +347,14 @@ export class SdkCarrier {
 					} catch (error) {
 						if (
 							attempt !== 0 ||
-							!(error instanceof Error) ||
-							error.message !== "Tool and final text cannot be proposed in the same turn"
+							(!(error instanceof SyntaxError) &&
+								!(
+									error instanceof Error &&
+									[
+										"Tool and final text cannot be proposed in the same turn",
+										"Tool arguments must be an object",
+									].includes(error.message)
+								))
 						)
 							throw error;
 						client.close();
