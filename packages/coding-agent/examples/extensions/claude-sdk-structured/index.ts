@@ -184,7 +184,7 @@ export class SdkCarrier {
 		const stream = createAssistantMessageEventStream();
 		void (async () => {
 			const output = emptyOutput(model);
-			const controller = new AbortController();
+			let controller = new AbortController();
 			const abort = () => controller.abort();
 			let client: Query | undefined;
 			let cwd: string | undefined;
@@ -220,88 +220,111 @@ export class SdkCarrier {
 				if (this.closed || options?.signal?.aborted) throw new Error("Pi request aborted");
 				options?.signal?.addEventListener("abort", abort, { once: true });
 				cwd = mkdtempSync(join(tmpdir(), "pi-sdk-structured-"));
-				const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
-					yield { type: "user", message: { role: "user", content: input }, parent_tool_use_id: null };
-				})();
-				client = this.queryFn({
-					prompt,
-					options: {
-						cwd,
-						model: model.id,
-						systemPrompt: system,
-						tools: [],
-						settingSources: [],
-						env,
-						persistSession: false,
-						thinking: options?.reasoning ? { type: "adaptive" } : { type: "disabled" },
-						...(options?.reasoning
-							? { effort: options.reasoning === "minimal" ? "low" : options.reasoning }
-							: {}),
-						permissionMode: "dontAsk",
-						outputFormat: { type: "json_schema", schema: outputSchema },
-						abortController: controller,
-						pathToClaudeCodeExecutable: CLAUDE_CLI,
-					},
-				});
-				this.active.set(controller, client);
-				let result: SDKResultMessage | undefined;
-				for await (const message of client) {
-					if (message.type === "result") {
-						result = message;
-						break;
+				let proposal: ReturnType<typeof parseSdkProposal> | undefined;
+				for (let attempt = 0; attempt < 2; attempt++) {
+					if (this.closed || options?.signal?.aborted || controller.signal.aborted)
+						throw new Error("Pi request aborted");
+					// The first malformed proposal never reached Pi. Retry only this case with a fresh SDK query.
+					const correction =
+						"Your previous structured response contained both a tool name and final text. It was discarded; no Pi tool ran. Return either a tool name and args_json with final empty, or final text with name and args_json empty.";
+					const retryInput: SdkInput =
+						attempt === 0
+							? input
+							: typeof input === "string"
+								? `${input}\n\n${correction}`
+								: [...input, { type: "text", text: correction }];
+					const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+						yield { type: "user", message: { role: "user", content: retryInput }, parent_tool_use_id: null };
+					})();
+					client = this.queryFn({
+						prompt,
+						options: {
+							cwd,
+							model: model.id,
+							systemPrompt: system,
+							tools: [],
+							settingSources: [],
+							env,
+							persistSession: false,
+							thinking: options?.reasoning ? { type: "adaptive" } : { type: "disabled" },
+							...(options?.reasoning
+								? { effort: options.reasoning === "minimal" ? "low" : options.reasoning }
+								: {}),
+							permissionMode: "dontAsk",
+							outputFormat: { type: "json_schema", schema: outputSchema },
+							abortController: controller,
+							pathToClaudeCodeExecutable: CLAUDE_CLI,
+						},
+					});
+					this.active.set(controller, client);
+					let result: SDKResultMessage | undefined;
+					for await (const message of client) {
+						if (message.type === "result") {
+							result = message;
+							break;
+						}
 					}
+					if (!result) throw new Error("SDK session ended without a result");
+					this.turns++;
+					this.observe?.({
+						turn: this.turns,
+						status: result.subtype === "success" && result.is_error ? "api_error" : result.subtype,
+						modelTurns: result.num_turns,
+						estimatedCostUsd: result.total_cost_usd,
+						usage: {
+							input: result.usage.input_tokens,
+							output: result.usage.output_tokens,
+							write: result.usage.cache_creation_input_tokens ?? 0,
+							read: result.usage.cache_read_input_tokens ?? 0,
+							oneHourWrite: result.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+							fiveMinuteWrite: result.usage.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+						},
+						modelTotals: Object.fromEntries(
+							Object.entries(result.modelUsage).map(([name, usage]) => [
+								name,
+								{
+									input: usage.inputTokens,
+									output: usage.outputTokens,
+									write: usage.cacheCreationInputTokens,
+									read: usage.cacheReadInputTokens,
+									estimatedCostUsd: usage.costUSD,
+								},
+							]),
+						),
+					});
+					const usage = result.usage;
+					output.usage.input += usage.input_tokens;
+					output.usage.output += usage.output_tokens;
+					output.usage.cacheRead += usage.cache_read_input_tokens ?? 0;
+					output.usage.cacheWrite += usage.cache_creation_input_tokens ?? 0;
+					output.usage.totalTokens =
+						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+					if (result.subtype !== "success" || result.is_error)
+						throw new Error(
+							`SDK turn failed: ${result.subtype}${result.subtype === "success" ? `: ${result.result}` : ""}`,
+						);
+					try {
+						proposal = parseSdkProposal(result.structured_output, context);
+					} catch (error) {
+						if (
+							attempt !== 0 ||
+							!(error instanceof Error) ||
+							error.message !== "Tool and final text cannot be proposed in the same turn"
+						)
+							throw error;
+						client.close();
+						this.active.delete(controller);
+						controller = new AbortController();
+						continue;
+					}
+					break;
 				}
-				if (!result) throw new Error("SDK session ended without a result");
-				this.turns++;
-				this.observe?.({
-					turn: this.turns,
-					status: result.subtype === "success" && result.is_error ? "api_error" : result.subtype,
-					modelTurns: result.num_turns,
-					estimatedCostUsd: result.total_cost_usd,
-					usage: {
-						input: result.usage.input_tokens,
-						output: result.usage.output_tokens,
-						write: result.usage.cache_creation_input_tokens ?? 0,
-						read: result.usage.cache_read_input_tokens ?? 0,
-						oneHourWrite: result.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
-						fiveMinuteWrite: result.usage.cache_creation?.ephemeral_5m_input_tokens ?? 0,
-					},
-					modelTotals: Object.fromEntries(
-						Object.entries(result.modelUsage).map(([name, usage]) => [
-							name,
-							{
-								input: usage.inputTokens,
-								output: usage.outputTokens,
-								write: usage.cacheCreationInputTokens,
-								read: usage.cacheReadInputTokens,
-								estimatedCostUsd: usage.costUSD,
-							},
-						]),
-					),
-				});
-				if (result.subtype !== "success" || result.is_error)
-					throw new Error(
-						`SDK turn failed: ${result.subtype}${result.subtype === "success" ? `: ${result.result}` : ""}`,
-					);
+				if (!proposal) throw new Error("SDK did not return a valid proposal");
 				await options?.onResponse?.({ status: 200, headers: {} }, model);
-				const proposal = parseSdkProposal(result.structured_output, context);
 				output.content = proposal.name
 					? [{ type: "toolCall", id: randomUUID(), name: proposal.name, arguments: proposal.args! }]
 					: [{ type: "text", text: proposal.text ?? "" }];
 				output.stopReason = proposal.name ? "toolUse" : "stop";
-				const usage = result.usage;
-				output.usage = {
-					input: usage.input_tokens,
-					output: usage.output_tokens,
-					cacheRead: usage.cache_read_input_tokens ?? 0,
-					cacheWrite: usage.cache_creation_input_tokens ?? 0,
-					totalTokens:
-						usage.input_tokens +
-						usage.output_tokens +
-						(usage.cache_read_input_tokens ?? 0) +
-						(usage.cache_creation_input_tokens ?? 0),
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
 				stream.push({ type: "start", partial: output });
 				stream.push({ type: "done", reason: output.stopReason, message: output });
 				stream.end(output);
