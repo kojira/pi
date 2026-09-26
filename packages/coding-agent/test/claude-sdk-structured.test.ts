@@ -585,6 +585,18 @@ describe("Claude SDK structured Pi boundary", () => {
 		});
 	});
 
+	it("escapes literal controls inside SDK tool JSON strings without changing the Pi tool value", () => {
+		const literal = '{"value":"first\nsecond\tthird"}';
+		const escaped = '{"value":"first\\nsecond\\tthird"}';
+		const expected = { name: "side_effect", args: { value: "first\nsecond\tthird" } };
+		expect(() => JSON.parse(literal)).toThrow();
+		expect(parseSdkProposal({ name: "side_effect", args_json: literal, final: "" }, context)).toEqual(expected);
+		expect(parseSdkProposal({ name: "side_effect", args_json: escaped, final: "" }, context)).toEqual(expected);
+		expect(() =>
+			parseSdkProposal({ name: "side_effect", args_json: '{"value":"first\nsecond",}', final: "" }, context),
+		).toThrow();
+	});
+
 	it.each([
 		{ name: "finish_work", args_json: "{}", final: "Also finish in prose" },
 		{ name: "unknown", args_json: "{}", final: "" },

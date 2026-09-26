@@ -58,6 +58,30 @@ export type SdkUsageSnapshot = {
 	>;
 };
 
+/** Preserve literal control characters in JSON string values as escaped JSON, without changing their decoded value. */
+function escapeJsonStringControls(raw: string): string {
+	let quoted = false;
+	let escaped = false;
+	let normalized = "";
+	for (const char of raw) {
+		if (escaped) {
+			normalized += char;
+			escaped = false;
+		} else if (quoted && char === "\\") {
+			normalized += char;
+			escaped = true;
+		} else if (char === '"') {
+			normalized += char;
+			quoted = !quoted;
+		} else if (quoted && char.charCodeAt(0) < 0x20) {
+			normalized += `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`;
+		} else {
+			normalized += char;
+		}
+	}
+	return normalized;
+}
+
 /** Parse the complete proposal before exposing any call to Pi's existing batch and policy checks. */
 export function parseSdkProposal(
 	value: unknown,
@@ -76,7 +100,14 @@ export function parseSdkProposal(
 	}
 	if (!context.tools?.some((tool) => tool.name === toolName)) throw new Error("Unknown proposed Pi tool");
 	if (final.trim()) throw new Error("Tool and final text cannot be proposed in the same turn");
-	const args: unknown = JSON.parse(args_json);
+	let args: unknown;
+	try {
+		args = JSON.parse(args_json);
+	} catch (error) {
+		const normalized = escapeJsonStringControls(args_json);
+		if (normalized === args_json) throw error;
+		args = JSON.parse(normalized);
+	}
 	if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Tool arguments must be an object");
 	return { name: toolName, args: args as Record<string, unknown> };
 }
