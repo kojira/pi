@@ -35,9 +35,6 @@ export function sdkFirstPartyEnv(source: NodeJS.ProcessEnv = process.env): Recor
 	if (!source.HOME || !source.PATH) throw new Error("SDK subscription route requires HOME and PATH");
 	return Object.fromEntries(SDK_ENV_KEYS.flatMap((key) => (source[key] ? [[key, source[key]]] : [])));
 }
-const PACKAGE_REFERENCE = "pi packages (docs/packages.md)";
-const WORK_REFERENCE =
-	"- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing";
 const PI_SUMMARIZATION_PREFIX = "You are a context summarization assistant.";
 const outputSchema = {
 	type: "object",
@@ -60,19 +57,6 @@ export type SdkUsageSnapshot = {
 		{ input: number; output: number; write: number; read: number; estimatedCostUsd: number }
 	>;
 };
-
-/** Keep Pi identity, links, and instructions; avoid the reproducibly rejected documentation phrasing. */
-export function adaptPiPromptForClaudeSdk(prompt: string): string {
-	if (prompt.split(PACKAGE_REFERENCE).length !== 2 || prompt.split(WORK_REFERENCE).length !== 2) {
-		throw new Error("Pi documentation instructions changed; SDK prompt adapter must be reviewed before use");
-	}
-	return prompt
-		.replace(PACKAGE_REFERENCE, "app packages (docs/packages.md)")
-		.replace(
-			WORK_REFERENCE,
-			"- For Pi-related work, consult applicable documentation and examples and follow their linked Markdown pages before implementing.",
-		);
-}
 
 /** Parse the complete proposal before exposing any call to Pi's existing batch and policy checks. */
 export function parseSdkProposal(
@@ -244,7 +228,7 @@ export class SdkCarrier {
 					options: {
 						cwd,
 						model: model.id,
-						systemPrompt: summarizing ? system : adaptPiPromptForClaudeSdk(system),
+						systemPrompt: system,
 						tools: [],
 						settingSources: [],
 						env,
