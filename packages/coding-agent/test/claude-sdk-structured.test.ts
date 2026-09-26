@@ -631,10 +631,38 @@ describe("Claude SDK structured Pi boundary", () => {
 			reason: "error",
 		},
 		{
+			responses: [
+				{ name: "side_effect", args_json: '{"value":"x" "extra":"y"}', final: "" },
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "" },
+			],
+			reason: "toolUse",
+		},
+		{
+			responses: [
+				{ name: "side_effect", args_json: '{"value":"x",}', final: "" },
+				{ name: "", args_json: "", final: "Only text" },
+			],
+			reason: "stop",
+		},
+		{
+			responses: [
+				{ name: "side_effect", args_json: "[]", final: "" },
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "" },
+			],
+			reason: "toolUse",
+		},
+		{
+			responses: [
+				{ name: "side_effect", args_json: '{"value":"x" "extra":"y"}', final: "" },
+				{ name: "side_effect", args_json: '{"value":"x",}', final: "" },
+			],
+			reason: "error",
+		},
+		{
 			responses: [{ name: "unknown", args_json: "{}", final: "" }],
 			reason: "error",
 		},
-	])("recovers only a mixed proposal before Pi dispatch: $reason/$responses", async ({ responses, reason }) => {
+	])("retries malformed SDK proposals before Pi dispatch: $reason/$responses", async ({ responses, reason }) => {
 		const requests: Array<{ input: unknown; resume?: string; persistSession?: boolean; abortedAtStart: boolean }> =
 			[];
 		let closed = 0;
@@ -692,8 +720,9 @@ describe("Claude SDK structured Pi boundary", () => {
 			).toBe(true);
 			expect(reply.content.filter((block) => block.type === "toolCall")).toHaveLength(reason === "toolUse" ? 1 : 0);
 			expect(reply.usage.input).toBe(3 * responses.length);
-			if (responses.length === 2) expect(JSON.stringify(requests[1]?.input)).toContain("no Pi tool ran");
-			if (reason === "error") expect(reply.errorMessage).toMatch(/Tool and final text|Unknown proposed Pi tool/);
+			if (responses.length === 2) expect(JSON.stringify(requests[1]?.input)).toContain("before any Pi tool ran");
+			if (reason === "error")
+				expect(reply.errorMessage).toMatch(/Tool and final text|Unknown proposed Pi tool|Expected|Unexpected/);
 		} finally {
 			carrier.close();
 		}
