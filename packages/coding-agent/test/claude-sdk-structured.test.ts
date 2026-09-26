@@ -595,4 +595,96 @@ describe("Claude SDK structured Pi boundary", () => {
 	])("rejects invalid or contradictory proposal before Pi dispatch: $name/$final", (proposal) => {
 		expect(() => parseSdkProposal(proposal, context)).toThrow();
 	});
+
+	it.each([
+		{
+			responses: [
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "Premature completion" },
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "" },
+			],
+			reason: "toolUse",
+		},
+		{
+			responses: [
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "Premature completion" },
+				{ name: "", args_json: "", final: "Only text" },
+			],
+			reason: "stop",
+		},
+		{
+			responses: [
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "Premature completion" },
+				{ name: "side_effect", args_json: '{"value":"x"}', final: "Still premature" },
+			],
+			reason: "error",
+		},
+		{
+			responses: [{ name: "unknown", args_json: "{}", final: "" }],
+			reason: "error",
+		},
+	])("recovers only a mixed proposal before Pi dispatch: $reason/$responses", async ({ responses, reason }) => {
+		const requests: Array<{ input: unknown; resume?: string; persistSession?: boolean; abortedAtStart: boolean }> =
+			[];
+		let closed = 0;
+		const fakeQuery = ((request: {
+			prompt: AsyncIterable<{ message: { content: unknown } }>;
+			options: { resume?: string; persistSession?: boolean; abortController: AbortController };
+		}) => {
+			const reply = responses[requests.length];
+			const iterator = (async function* () {
+				for await (const message of request.prompt) {
+					requests.push({
+						input: message.message.content,
+						...request.options,
+						abortedAtStart: request.options.abortController.signal.aborted,
+					});
+					yield {
+						type: "result",
+						subtype: "success",
+						is_error: false,
+						num_turns: 1,
+						total_cost_usd: 0,
+						usage: { input_tokens: 3, output_tokens: 2 },
+						modelUsage: {},
+						structured_output: reply,
+					};
+				}
+			})();
+			return Object.assign(iterator, {
+				close: () => {
+					closed++;
+					request.options.abortController.abort();
+				},
+			});
+		}) as unknown as NonNullable<ConstructorParameters<typeof SdkCarrier>[1]>;
+		const carrier = new SdkCarrier(undefined, fakeQuery);
+		try {
+			const model = {
+				api: "claude-sdk-structured",
+				provider: "claude-sdk-structured",
+				id: "claude-opus-5-5",
+			} as Model<string>;
+			const reply = await carrier
+				.stream(model, {
+					systemPrompt: "You are a read-only child reviewer.",
+					messages: [{ role: "user", content: "Review safely" } as Context["messages"][number]],
+					tools: context.tools,
+				})
+				.result();
+			expect(reply.stopReason).toBe(reason);
+			expect(requests).toHaveLength(responses.length);
+			expect(
+				requests.every(
+					(request) => request.resume === undefined && request.persistSession === false && !request.abortedAtStart,
+				),
+			).toBe(true);
+			expect(reply.content.filter((block) => block.type === "toolCall")).toHaveLength(reason === "toolUse" ? 1 : 0);
+			expect(reply.usage.input).toBe(3 * responses.length);
+			if (responses.length === 2) expect(JSON.stringify(requests[1]?.input)).toContain("no Pi tool ran");
+			if (reason === "error") expect(reply.errorMessage).toMatch(/Tool and final text|Unknown proposed Pi tool/);
+		} finally {
+			carrier.close();
+		}
+		expect(closed).toBe(responses.length);
+	});
 });
