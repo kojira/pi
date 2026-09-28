@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { type AssistantMessage, type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
@@ -47,6 +47,31 @@ describe("explicit work control", () => {
 		for (const event of harness.eventsOfType("message_end")) {
 			expect(JSON.stringify(event)).not.toContain("<done");
 		}
+	});
+
+	it("ends every continuation request with a request-only user turn that is never persisted", async () => {
+		const harness = await createHarness({});
+		harnesses.push(harness);
+		const tails: Array<{ role: string; content: unknown }> = [];
+		const capture = (respond: (context: Context) => AssistantMessage) => (context: Context) => {
+			const last = context.messages.at(-1)!;
+			tails.push({ role: last.role, content: last.role === "user" ? last.content : undefined });
+			return respond(context);
+		};
+		harness.setResponses([capture(next), capture(next), capture(done())]);
+		await harness.session.prompt("Verify");
+		expect(tails).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Verify" }] },
+			{ role: "user", content: "continue" },
+			{ role: "user", content: "continue" },
+		]);
+		expect(harness.session.workContract?.status).toBe("resolved");
+		expect(getUserTexts(harness)).toEqual(["Verify"]);
+		const persisted = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(persisted).toHaveLength(1);
+		expect(JSON.stringify(harness.sessionManager.getEntries())).not.toContain('"continue"');
 	});
 
 	it("continues without a marker or synthetic repair calls, even beyond the former repair limit", async () => {

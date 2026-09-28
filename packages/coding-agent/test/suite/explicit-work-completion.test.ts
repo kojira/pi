@@ -403,10 +403,14 @@ describe("explicit work completion", () => {
 			checkpoint(),
 			fauxAssistantMessage("DIAGNOSTIC_PROGRESS"),
 			(context) => {
-				const previous = context.messages.at(-1);
+				// The provider request ends with a request-only user turn; the assistant text precedes it.
+				const previous = context.messages.at(-2);
+				const tail = context.messages.at(-1);
 				observed =
 					previous?.role === "assistant" &&
-					previous.content.some((part) => part.type === "text" && part.text === "DIAGNOSTIC_PROGRESS");
+					previous.content.some((part) => part.type === "text" && part.text === "DIAGNOSTIC_PROGRESS") &&
+					tail?.role === "user" &&
+					tail.content === "continue";
 				return finish();
 			},
 		]);
