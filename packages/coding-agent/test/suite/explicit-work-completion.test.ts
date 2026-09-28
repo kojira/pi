@@ -1,6 +1,7 @@
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { CONTINUATION_USER_TEXT } from "../../src/core/work-contract-runtime.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
 
@@ -410,7 +411,7 @@ describe("explicit work completion", () => {
 					previous?.role === "assistant" &&
 					previous.content.some((part) => part.type === "text" && part.text === "DIAGNOSTIC_PROGRESS") &&
 					tail?.role === "user" &&
-					tail.content === "continue";
+					tail.content === CONTINUATION_USER_TEXT;
 				return finish();
 			},
 		]);

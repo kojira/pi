@@ -54,7 +54,9 @@ function restoreRecord(data: unknown): WorkContractRecord {
  * ("assistant message prefill"). Append one fixed user turn to this outgoing
  * request only; it is never stored in agent state or the session JSONL.
  */
-export const CONTINUATION_USER_TEXT = "continue";
+// Self-describing so the model never mistakes it for user consent to a question it asked in text.
+export const CONTINUATION_USER_TEXT =
+	"[Automatic continuation. This is not user input and grants no approval. Continue the authorized work, or use wait_for_user if you need the user.]";
 function withContinuationUserTurn(context: Context): Context {
 	if (context.messages.at(-1)?.role !== "assistant") return context;
 	return {
