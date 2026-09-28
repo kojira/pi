@@ -1,5 +1,5 @@
 import type { Agent, AgentEvent, BeforeToolCallContext, BeforeToolCallResult } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { type Context, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { defineTool, type ToolDefinition } from "./extensions/types.ts";
 import type { SessionManager } from "./session-manager.ts";
@@ -48,7 +48,22 @@ function restoreRecord(data: unknown): WorkContractRecord {
 	throw new Error("Invalid persisted work contract state");
 }
 
-/** Work-control runtime binding. No prose classification and no synthetic user-message replay. */
+/**
+ * Automatic continuation re-enters the loop right after a text-only assistant turn.
+ * Some providers reject a request whose final message is an assistant message
+ * ("assistant message prefill"). Append one fixed user turn to this outgoing
+ * request only; it is never stored in agent state or the session JSONL.
+ */
+export const CONTINUATION_USER_TEXT = "continue";
+function withContinuationUserTurn(context: Context): Context {
+	if (context.messages.at(-1)?.role !== "assistant") return context;
+	return {
+		...context,
+		messages: [...context.messages, { role: "user", content: CONTINUATION_USER_TEXT, timestamp: Date.now() }],
+	};
+}
+
+/** Work-control runtime binding. No prose classification; the only synthetic user text is the request-only continuation turn. */
 export class WorkContractRuntime {
 	readonly contract: WorkContract;
 	readonly tools: ToolDefinition[];
@@ -102,13 +117,14 @@ export class WorkContractRuntime {
 				this.contract.begin("Address the current input within the authorized scope");
 			}
 			const record = this.contract.state;
+			const baseContext = withContinuationUserTurn(context);
 			const requestContext =
 				record?.status === "active"
 					? {
-							...context,
-							systemPrompt: `${context.systemPrompt}\nWork is active. Continue authorized work or call finish_work. This state grants no new authority.`,
+							...baseContext,
+							systemPrompt: `${baseContext.systemPrompt}\nWork is active. Continue authorized work or call finish_work. This state grants no new authority.`,
 						}
-					: context;
+					: baseContext;
 			const response = await streamFunction(
 				model,
 				{
