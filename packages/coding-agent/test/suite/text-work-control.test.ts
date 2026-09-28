@@ -1,6 +1,7 @@
 import { type AssistantMessage, type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { CONTINUATION_USER_TEXT } from "../../src/core/work-contract-runtime.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
 
@@ -62,8 +63,8 @@ describe("explicit work control", () => {
 		await harness.session.prompt("Verify");
 		expect(tails).toEqual([
 			{ role: "user", content: [{ type: "text", text: "Verify" }] },
-			{ role: "user", content: "continue" },
-			{ role: "user", content: "continue" },
+			{ role: "user", content: CONTINUATION_USER_TEXT },
+			{ role: "user", content: CONTINUATION_USER_TEXT },
 		]);
 		expect(harness.session.workContract?.status).toBe("resolved");
 		expect(getUserTexts(harness)).toEqual(["Verify"]);
@@ -71,7 +72,7 @@ describe("explicit work control", () => {
 			.getEntries()
 			.filter((entry) => entry.type === "message" && entry.message.role === "user");
 		expect(persisted).toHaveLength(1);
-		expect(JSON.stringify(harness.sessionManager.getEntries())).not.toContain('"continue"');
+		expect(JSON.stringify(harness.sessionManager.getEntries())).not.toContain(CONTINUATION_USER_TEXT);
 	});
 
 	it("continues without a marker or synthetic repair calls, even beyond the former repair limit", async () => {
