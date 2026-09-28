@@ -172,23 +172,57 @@ describe("generateSummary reasoning options", () => {
 		);
 	});
 
-	it("rejects a length-limited history summary", async () => {
+	it("rejects a length-limited history summary with content-free usage metrics", async () => {
 		completeSimpleMock.mockResolvedValueOnce({
 			...mockSummaryResponse,
 			stopReason: "length",
-			content: [{ type: "text", text: "partial" }],
+			content: [{ type: "text", text: "## Goal\nCREDENTIAL-MARKER" }],
+			usage: { ...mockSummaryResponse.usage, output: 1600 },
+		});
+
+		let error: unknown;
+		try {
+			await generateSummaryWithUsage(
+				messages,
+				createModel(false),
+				2000,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				"old summary",
+			);
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toContain("generation hit the token cap");
+		expect(message).toMatch(
+			/cap=1600, output=1600, textChars=25, sectionsSeen=1\/6, conversationChars=\d+, previousChars=11/,
+		);
+		expect(message).not.toContain("CREDENTIAL-MARKER");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not count partial or quoted section headings in a failed summary", async () => {
+		completeSimpleMock.mockResolvedValueOnce({
+			...mockSummaryResponse,
+			stopReason: "length",
+			content: [{ type: "text", text: "## Goalkeepers\n> ## Progress" }],
+			usage: { ...mockSummaryResponse.usage, output: 0 },
 		});
 
 		await expect(generateSummaryWithUsage(messages, createModel(false), 2000, "test-key")).rejects.toThrow(
-			"generation hit the token cap",
+			/output=unknown, textChars=\d+, sectionsSeen=0\/6/,
 		);
 	});
 
-	it("rejects a length-limited split-turn summary", async () => {
+	it("rejects a length-limited split-turn summary with content-free metrics", async () => {
 		completeSimpleMock.mockResolvedValueOnce({
 			...mockSummaryResponse,
 			stopReason: "length",
-			content: [{ type: "text", text: "partial" }],
+			content: [{ type: "text", text: "## Original Request\npartial" }],
 		});
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
@@ -201,7 +235,7 @@ describe("generateSummary reasoning options", () => {
 		};
 
 		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow(
-			"generation hit the token cap",
+			/cap=1000, output=10, textChars=\d+, sectionsSeen=1\/3, conversationChars=\d+, previousChars=0/,
 		);
 	});
 
