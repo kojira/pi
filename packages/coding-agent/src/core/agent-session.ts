@@ -347,6 +347,8 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionGeneration = 0;
+	/** A truncated threshold summary is not retried after every tool in the same user turn. */
+	private _failedThresholdSummaryKey: string | undefined;
 	private _continuationCancellationGeneration = 0;
 	private _pendingInLoopCompactionContinuation = false;
 	private _pendingInLoopCompactionSignal: AbortSignal | undefined;
@@ -573,6 +575,23 @@ export class AgentSession {
 		};
 	}
 
+	/** Changes for a new user message, model, or successful (including manual) compaction. */
+	private _thresholdSummaryKey(): string | undefined {
+		const branch = this.sessionManager.getBranch();
+		if (!this.model) return undefined;
+		const compaction = getLatestCompactionEntry(branch);
+		let latestUserId: string | undefined;
+		let latestModelChangeId: string | undefined;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (!latestUserId && entry.type === "message" && entry.message.role === "user") latestUserId = entry.id;
+			if (!latestModelChangeId && entry.type === "model_change") latestModelChangeId = entry.id;
+			if (latestUserId && latestModelChangeId) break;
+		}
+		if (!latestUserId) return undefined;
+		return `${this.model.provider}\0${this.model.id}\0${latestModelChangeId ?? ""}\0${compaction?.id ?? ""}\0${latestUserId}`;
+	}
+
 	private async _compactBeforeNextAssistantResponse(
 		context: AgentContext,
 		runSignal?: AbortSignal,
@@ -587,6 +606,9 @@ export class AgentSession {
 		) {
 			return context;
 		}
+
+		const summaryKey = this._thresholdSummaryKey();
+		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) return context;
 
 		const compactionGeneration = this._autoCompactionGeneration;
 		const cancellationGeneration = this._continuationCancellationGeneration;
@@ -2348,6 +2370,8 @@ export class AgentSession {
 			contextTokens = directContextTokens;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
+			const summaryKey = this._thresholdSummaryKey();
+			if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) return false;
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
@@ -2472,6 +2496,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			this._failedThresholdSummaryKey = undefined;
 			this._autoCompactionGeneration++;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
@@ -2521,6 +2546,15 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			// Keep reporting the first failure, but avoid spending the same output
+			// budget again after every tool result in this user turn. New user input,
+			// a model switch, and an explicit successful compact all permit retry.
+			if (
+				reason === "threshold" &&
+				errorMessage.includes("generation hit the token cap and the summary is incomplete")
+			) {
+				this._failedThresholdSummaryKey = this._thresholdSummaryKey();
+			}
 			if (started) {
 				const formattedErrorMessage =
 					reason === "overflow"
