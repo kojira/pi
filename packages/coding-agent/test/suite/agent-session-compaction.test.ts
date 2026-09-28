@@ -10,12 +10,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { estimateTokens } from "../../src/core/compaction/index.ts";
+import { estimateTokens, generateSummaryWithUsage } from "../../src/core/compaction/index.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
+	_compactBeforeNextAssistantResponse: (context: AgentContext) => Promise<AgentContext>;
 	_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
 };
 
@@ -384,6 +385,91 @@ describe("AgentSession compaction characterization", () => {
 				errorMessage: "Auto-compaction failed: summary generator blew up",
 			}),
 		]);
+	});
+
+	it("asks for a concise updated checkpoint within the unchanged output cap", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let prompt = "";
+		let maxTokens = -1;
+		useSummaryStreamFn(harness, "concise checkpoint", (context, options) => {
+			prompt = context.messages[0]?.role === "user" ? (context.messages[0].content[0] as { text: string }).text : "";
+			maxTokens = options?.maxTokens ?? -1;
+		});
+		const result = await generateSummaryWithUsage(
+			[{ role: "user", content: "recent work", timestamp: Date.now() }],
+			harness.getModel(),
+			16384,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			"previous checkpoint",
+			undefined,
+			harness.session.agent.streamFunction,
+		);
+		expect(result.text).toBe("concise checkpoint");
+		expect(maxTokens).toBe(13107);
+		expect(prompt).toContain("aim for at most 6553 tokens");
+		expect(prompt).toContain("CONDENSE completed work and repeated attempts");
+		expect(prompt).toContain("PRESERVE still-actionable user requirements");
+		expect(prompt).not.toContain("PRESERVE all existing information");
+	});
+
+	it("does not repeat a truncated threshold summary after every tool in the same user turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		let calls = 0;
+		harness.session.agent.streamFunction = (model) => {
+			calls++;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() =>
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: {
+						...fauxAssistantMessage("incomplete", { stopReason: "length" }),
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+					},
+				}),
+			);
+			return stream;
+		};
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		const thresholdResponse = () =>
+			createAssistant(harness, {
+				stopReason: "toolUse",
+				totalTokens: harness.getModel().contextWindow - 1000,
+				timestamp: Date.now(),
+			});
+		await internals._checkCompaction(thresholdResponse());
+		expect(calls).toBe(1);
+		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toContain("generation hit the token cap");
+		await internals._checkCompaction(thresholdResponse());
+		await internals._compactBeforeNextAssistantResponse({
+			...harness.session.agent.state,
+			messages: harness.session.agent.state.messages,
+		} as AgentContext);
+		expect(calls).toBe(1);
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
+
+		harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "new request" }],
+			timestamp: Date.now(),
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+		await internals._checkCompaction(thresholdResponse());
+		expect(calls).toBe(2);
+		// Switching A -> B -> A must not retain A's failed-turn suppression.
+		harness.sessionManager.appendModelChange(harness.getModel().provider, "other-model");
+		harness.sessionManager.appendModelChange(harness.getModel().provider, harness.getModel().id);
+		await internals._checkCompaction(thresholdResponse());
+		expect(calls).toBe(3);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 	});
 
 	it("compacts and resumes after a length stop below the desired output limit", async () => {

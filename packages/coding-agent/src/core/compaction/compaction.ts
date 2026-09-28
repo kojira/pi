@@ -497,15 +497,16 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Preserve exact file paths, function names, and error messages when they are still needed to continue. Group repeated attempts and completed work; do not copy a chronological transcript.`;
 
 const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
+- PRESERVE still-actionable user requirements, safety constraints, unresolved work, and decisions from the previous summary
+- CONDENSE completed work and repeated attempts into a few outcome-focused bullets; do not carry forward every historical detail
 - ADD new progress, decisions, and context from the new messages
 - UPDATE the Progress section: move items from "In Progress" to "Done" when completed
 - UPDATE "Next Steps" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
+- PRESERVE exact file paths, function names, and error messages only when needed for the current work
+- Remove obsolete details, but never invent a completed result or drop an unresolved requirement
 
 Use this EXACT format:
 
@@ -534,7 +535,7 @@ Use this EXACT format:
 ## Critical Context
 - [Preserve important context, add new if needed]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Do not reproduce the previous summary or tool outputs verbatim.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -693,6 +694,14 @@ export async function generateSummaryWithUsage(
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}
 	promptText += basePrompt;
+	// A length-stop cannot be persisted as a checkpoint. Request a materially shorter
+	// summary than the hard cap, leaving room for token-estimation variance.
+	if (maxTokens > 0) {
+		promptText +=
+			`\n\nOutput budget: aim for at most ${Math.floor(maxTokens * 0.5)} tokens. ` +
+			`Prioritize active work and still-relevant constraints over historical detail. ` +
+			`Finish every section before the hard ${maxTokens}-token output cap; never continue a transcript.`;
+	}
 
 	const completionOptions = createSummarizationOptions(
 		model,
