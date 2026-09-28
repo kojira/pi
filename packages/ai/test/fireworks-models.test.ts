@@ -18,28 +18,20 @@ afterEach(() => {
 });
 
 describe("Fireworks models", () => {
-	it("registers the default Kimi K2.6 model via Anthropic-compatible Messages API", () => {
-		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
+	it("registers the current Kimi K3 model via OpenAI-compatible completions", () => {
+		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k3");
 
-		expect(model).toBeDefined();
-		expect(model.api).toBe("anthropic-messages");
+		expect(model.api).toBe("openai-completions");
 		expect(model.provider).toBe("fireworks");
-		expect(model.baseUrl).toBe("https://api.fireworks.ai/inference");
+		expect(model.baseUrl).toBe("https://api.fireworks.ai/inference/v1");
 		expect(model.reasoning).toBe(true);
 		expect(model.input).toEqual(["text", "image"]);
-		expect(model.contextWindow).toBe(262000);
-		expect(model.maxTokens).toBe(262000);
-		expect(model.cost).toEqual({
-			input: 0.95,
-			output: 4,
-			cacheRead: 0.16,
-			cacheWrite: 0,
-		});
+		expect(model.compat?.sendSessionAffinityHeaders).toBe(true);
 	});
 
-	it("aligns GLM 5.2 Fast with GLM 5.2's OpenAI-compatible config", () => {
-		const base = getModel("fireworks", "accounts/fireworks/models/glm-5p2");
-		const fast = getModel("fireworks", "accounts/fireworks/routers/glm-5p2-fast");
+	it("aligns GLM 5.3 Fast with GLM 5.3's OpenAI-compatible config", () => {
+		const base = getModel("fireworks", "accounts/fireworks/models/glm-5p3");
+		const fast = getModel("fireworks", "accounts/fireworks/routers/glm-5p3-fast");
 
 		expect(fast.api).toBe(base.api);
 		expect(fast.baseUrl).toBe(base.baseUrl);
@@ -47,7 +39,7 @@ describe("Fireworks models", () => {
 		expect(fast.thinkingLevelMap).toEqual(base.thinkingLevelMap);
 	});
 
-	it.each(["accounts/fireworks/models/glm-5p2", "accounts/fireworks/routers/glm-5p2-fast"] as const)(
+	it.each(["accounts/fireworks/models/glm-5p3", "accounts/fireworks/routers/glm-5p3-fast"] as const)(
 		"omits unsupported long cache retention for %s",
 		async (modelId) => {
 			const model = getModel("fireworks", modelId);
@@ -128,13 +120,11 @@ describe("Fireworks models", () => {
 		expect(getEnvApiKey("fireworks")).toBe("test-fireworks-key");
 	});
 
-	it("sets Fireworks-specific compat for session affinity and unsupported tool fields", () => {
-		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
+	it("sets current Fireworks-specific compat for Kimi K3", () => {
+		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k3");
 
-		expect(model.compat).toBeDefined();
 		expect(model.compat?.sendSessionAffinityHeaders).toBe(true);
-		expect(model.compat?.supportsEagerToolInputStreaming).toBe(false);
-		expect(model.compat?.supportsCacheControlOnTools).toBe(false);
+		expect(model.compat?.requiresReasoningContentOnAssistantMessages).toBe(true);
 		expect(model.compat?.supportsLongCacheRetention).toBe(false);
 	});
 });

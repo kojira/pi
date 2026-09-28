@@ -74,6 +74,23 @@ const localOpenAICompletionsModel = {
 	maxTokens: 8192,
 } satisfies Omit<Model<"openai-completions">, "id" | "name" | "compat">;
 
+// Exercise compatibility for historical session messages even after a model ID
+// disappears from the live catalog. This is a transport fixture, not a registry assertion.
+const legacyOpenCodeGoKimiModel: Model<"openai-completions"> = {
+	...localOpenAICompletionsModel,
+	id: "kimi-k2.6",
+	name: "Kimi K2.6 (legacy OpenCode Go fixture)",
+	provider: "opencode-go",
+	compat: {
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		thinkingFormat: "deepseek",
+		supportsReasoningEffort: false,
+		maxTokensField: "max_tokens",
+		supportsLongCacheRetention: false,
+	},
+};
+
 type CapturedParams = {
 	chat_template_kwargs?: Record<string, unknown>;
 	thinking?: unknown;
@@ -1244,7 +1261,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("opencode-go", "kimi-k2.6")!;
+		const { compat: _compat, ...baseModel } = legacyOpenCodeGoKimiModel;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const response = await streamSimple(
 			model,
@@ -1291,7 +1308,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("replays OpenCode Go reasoning thinking blocks as reasoning_content", () => {
-		const { compat: _compat, ...baseModel } = getModel("opencode-go", "kimi-k2.6")!;
+		const { compat: _compat, ...baseModel } = legacyOpenCodeGoKimiModel;
 		const model = { ...baseModel, api: "openai-completions" } as Model<"openai-completions">;
 		const messages = convertMessages(
 			model,
@@ -1349,8 +1366,8 @@ describe("openai-completions tool_choice", () => {
 		expect(messages[0]).not.toHaveProperty("reasoning");
 	});
 
-	it("sends thinking disabled for OpenCode Go Kimi K2.6 when thinking is off", async () => {
-		const model = getModel("opencode-go", "kimi-k2.6")!;
+	it("sends thinking disabled for legacy OpenCode Go Kimi K2.6 when thinking is off", async () => {
+		const model = legacyOpenCodeGoKimiModel;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1371,8 +1388,8 @@ describe("openai-completions tool_choice", () => {
 		expect(params.reasoning_effort).toBeUndefined();
 	});
 
-	it("sends thinking enabled for OpenCode Go Kimi K2.6 when thinking is enabled", async () => {
-		const model = getModel("opencode-go", "kimi-k2.6")!;
+	it("sends thinking enabled for legacy OpenCode Go Kimi K2.6 when thinking is enabled", async () => {
+		const model = legacyOpenCodeGoKimiModel;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1443,7 +1460,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("sends max_tokens for OpenCode completions models", async () => {
-		const cases = [getModel("opencode-go", "kimi-k2.6")!, getModel("opencode", "kimi-k2.6")!] as const;
+		const cases = [legacyOpenCodeGoKimiModel, getModel("opencode", "kimi-k2.6")!] as const;
 
 		for (const model of cases) {
 			let payload: unknown;
