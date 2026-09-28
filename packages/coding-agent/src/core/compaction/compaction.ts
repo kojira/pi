@@ -655,6 +655,26 @@ function buildSummarizationContext(promptText: string): Context {
 	};
 }
 
+/** Record only bounded numeric diagnostics, never failed summary or conversation content. */
+function lengthStopWithMetrics(
+	failure: string,
+	response: AssistantMessage,
+	maxTokens: number,
+	conversationChars: number,
+	previousChars: number,
+	sections: readonly string[],
+): Error {
+	const text = contentText(response.content);
+	// Section names are fixed literals supplied by Pi's own prompts. Require
+	// entire heading lines, not quoted text or similarly prefixed names.
+	const sectionsSeen = sections.filter((name) => new RegExp(`^## ${name}[ \\t]*\\r?$`, "m").test(text)).length;
+	const outputTokens = response.usage.output > 0 ? response.usage.output : "unknown";
+	return new Error(
+		`${failure}; length metrics: cap=${maxTokens}, output=${outputTokens}, textChars=${text.length}, ` +
+			`sectionsSeen=${sectionsSeen}/${sections.length}, conversationChars=${conversationChars}, previousChars=${previousChars}`,
+	);
+}
+
 /** Generate or update a conversation summary and return its provider usage. */
 export async function generateSummaryWithUsage(
 	currentMessages: AgentMessage[],
@@ -725,6 +745,16 @@ export async function generateSummaryWithUsage(
 
 	const failure = getSummarizationFailure(response, "Summarization");
 	if (failure) {
+		if (response.stopReason === "length") {
+			throw lengthStopWithMetrics(
+				failure,
+				response,
+				maxTokens,
+				conversationText.length,
+				previousSummary?.length ?? 0,
+				["Goal", "Constraints & Preferences", "Progress", "Key Decisions", "Next Steps", "Critical Context"],
+			);
+		}
 		throw new Error(failure);
 	}
 	if (response.content.some((block) => block.type === "toolCall")) {
@@ -1010,6 +1040,13 @@ async function generateTurnPrefixSummary(
 
 	const failure = getSummarizationFailure(response, "Turn prefix summarization");
 	if (failure) {
+		if (response.stopReason === "length") {
+			throw lengthStopWithMetrics(failure, response, maxTokens, conversationText.length, 0, [
+				"Original Request",
+				"Early Progress",
+				"Context for Suffix",
+			]);
+		}
 		throw new Error(failure);
 	}
 	if (response.content.some((block) => block.type === "toolCall")) {
