@@ -720,14 +720,32 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider["ant-ling"]).toBe("Ring-2.6-1T");
 	});
 
-	test("built-in defaults exist in generated provider catalogs", () => {
+	// These two defaults were removed from the upstream catalog. Keep their
+	// product bug visible as expected failures rather than silently changing
+	// the user's default model (and potentially its price) in a CI-only fix.
+	const retiredDefaults = [
+		["fireworks", "accounts/fireworks/models/kimi-k2p6"],
+		["opencode-go", "kimi-k2.6"],
+	] as const;
+
+	test("other built-in defaults exist in generated provider catalogs", () => {
+		const retiredProviders = new Set<string>(retiredDefaults.map(([provider]) => provider));
 		for (const provider of getBuiltinProviders()) {
+			if (retiredProviders.has(provider)) continue;
 			const defaultId = defaultModelPerProvider[provider];
 			expect(
 				getBuiltinModels(provider).some((model) => model.id === defaultId),
 				`${provider} default ${defaultId} should exist in its generated catalog`,
 			).toBe(true);
 		}
+	});
+
+	test.each(retiredDefaults)("retired %s default remains %s until a replacement is approved", (provider, id) => {
+		expect(defaultModelPerProvider[provider]).toBe(id);
+	});
+
+	test.fails.each(retiredDefaults)("retired %s default %s is absent from the upstream catalog", (provider, id) => {
+		expect(getBuiltinModels(provider).some((model) => model.id === id)).toBe(true);
 	});
 
 	test("ai-gateway default tracks current model", () => {
