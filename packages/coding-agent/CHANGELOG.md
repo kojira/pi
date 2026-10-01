@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `images.maxHistoryImages` setting to send only the newest N history images to the LLM, replacing older ones with a short note so image-heavy sessions stay under provider request size limits.
 - Added `ctx.modelRegistry.stream()` and `streamSimple()` for extension model calls through configured providers with resolved authentication ([#8964](https://github.com/earendil-works/pi/issues/8964)).
 
 ### Changed

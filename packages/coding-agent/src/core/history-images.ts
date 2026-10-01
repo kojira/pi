@@ -1,7 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai/compat";
 
 export const OMITTED_HISTORY_IMAGE_TEXT =
-	"[Earlier image omitted from this request to bound request size. Read the file again if you need to see it.]";
+	"[Earlier image omitted from this request to bound request size. If it came from a file, read it again; otherwise ask the user to resend it.]";
 
 /**
  * Keep only the newest `maxImages` image blocks in the outgoing LLM context.
