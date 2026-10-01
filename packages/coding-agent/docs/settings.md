@@ -188,6 +188,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 | `terminal.trueColor` | boolean or `"auto"` | `"auto"` | Override truecolor support (advanced, JSON-only) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max. Applies to `@file` attachments, `read`, and images returned by tools |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+| `images.maxHistoryImages` | number | unlimited | Send only the newest N images to the LLM; older images are replaced with a short text note. Session history is unchanged. Once the limit is exceeded, each new image changes an earlier message and invalidates the provider prompt cache from that point |
 
 ### Shell
 
