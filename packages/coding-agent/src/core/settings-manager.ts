@@ -50,6 +50,7 @@ export interface TerminalSettings {
 export interface ImageSettings {
 	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
 	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+	maxHistoryImages?: number; // default: unlimited - send only the newest N images; older ones become a text note
 }
 
 export interface ThinkingBudgetsSettings {
@@ -1264,6 +1265,11 @@ export class SettingsManager {
 		this.globalSettings.images.blockImages = blocked;
 		this.markModified("images", "blockImages");
 		this.save();
+	}
+
+	getMaxHistoryImages(): number | undefined {
+		const value = this.settings.images?.maxHistoryImages;
+		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
 	}
 
 	getEnabledModels(): string[] | undefined {
