@@ -365,6 +365,44 @@ describe("tracker: root ops", () => {
 		expect(t.flush()).toEqual([["p", ["xs"], 0, 0, items]]);
 	});
 
+	it.each(["push", "unshift", "splice"] as const)("preserves ordered large %s insertions", (method) => {
+		const initial = [-1, -2, -3];
+		const t = track({ xs: initial.slice() });
+		t.flush();
+		const items = Array.from({ length: 100_000 }, (_, index) => index);
+		const args = method === "splice" ? [1, 1, ...items] : items;
+		const result = Reflect.apply(t.state.xs[method], t.state.xs, args);
+		const expected =
+			method === "push"
+				? initial.concat(items)
+				: method === "unshift"
+					? items.concat(initial)
+					: [-1].concat(items, [-3]);
+		expect(result).toEqual(method === "splice" ? [-2] : expected.length);
+		expect(t.target.xs).toEqual(expected);
+		expect(apply({ xs: initial }, t.flush())).toEqual({ xs: expected });
+		expect(t.flush()).toEqual([]);
+	});
+
+	it("preserves empty insertions and adopted object references", () => {
+		const first = { value: 1 };
+		const last = { value: 3 };
+		const t = track({ xs: [first, last] });
+		t.flush();
+		expect(t.state.xs.push()).toBe(2);
+		expect(t.state.xs.unshift()).toBe(2);
+		expect(t.state.xs.splice(1, 0)).toEqual([]);
+		expect(t.dirty).toBe(false);
+		expect(t.flush()).toEqual([]);
+		const middle = { value: 2 };
+		expect(t.state.xs.splice(1, 0, middle)).toEqual([]);
+		expect(t.target.xs[0]).toBe(first);
+		expect(t.target.xs[1]).toBe(middle);
+		expect(t.target.xs[2]).toBe(last);
+		expect(t.state.xs.splice(1, 1)[0]).toBe(middle);
+		expect(t.flush()).toEqual([]);
+	});
+
 	it("grows arrays with explicit null values", () => {
 		const initial = { xs: [1] as (number | null)[] };
 		const t = track(structuredClone(initial));
