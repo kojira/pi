@@ -235,6 +235,16 @@ await session.followUp("After you're done, also do this");
 
 Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
 
+For input intended only for a specific active run, retain its `agent_start.runId`
+and call `await session.steerIfActive(text, expectedRunId, images?)`. This returns
+`GuardedSteerResult`: `{accepted:true}` or
+`{accepted:false, reason:"run_not_accepting"}`. The latter guarantees no delivery;
+the former means queued/recipient-accepted, not necessarily consumed. Cancellation
+can leave previously accepted input pending. A recipient exception throws
+`SteeringDeliveryUncertainError` and never falls back to the parent queue. Do not
+replay uncertain input. Ordinary `steer()` keeps its legacy idle-queue behavior.
+See [guarded RPC steering](rpc.md#guarded-steering) for lifecycle and compatibility.
+
 ### Agent and AgentState
 
 The `Agent` class (from `@earendil-works/pi-agent-core`) handles the core LLM interaction. Access it via `session.agent`.

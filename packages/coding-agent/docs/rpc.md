@@ -99,6 +99,43 @@ Response:
 
 See [set_steering_mode](#set_steering_mode) for controlling how steering messages are processed.
 
+##### Guarded steering
+
+Clients retaining an idle RPC process must not infer a live consumer from a missing
+`agent_settled` event: extension settlement handlers can delay that event. Check
+`get_state.data.capabilities.guardedSteer === 1`, retain the `runId` from the
+`agent_start` that consumed the request, and send:
+
+```json
+{"id":"steer-1","type":"steer","message":"Additional input","expectedRunId":"opaque-run-id"}
+```
+
+The response has `success:true` and `data:{"accepted":true}` if enqueued in that
+same accepting run or accepted by its nested steering recipient. Acceptance is not
+consumption. Observe user `message_start` or recipient `steering_consumed` separately.
+If no longer accepting (including cancellation or run replacement), the response is
+`success:true, data:{"accepted":false,"reason":"run_not_accepting"}` with no queue
+mutation. Only that definitive rejection permits normal resubmission by the client.
+
+Malformed guarded requests return `success:false`, `errorCode:"INVALID_STEER_REQUEST"`
+and an `error` string. A recipient exception returns
+`success:false, errorCode:"STEER_DELIVERY_UNCERTAIN"`; it never falls back to the
+parent queue. Lost acknowledgements, timeouts, errors and malformed responses do
+not prove non-acceptance and must not be automatically replayed.
+
+The final empty-queue check closes admission synchronously. `finish_work` itself
+is not this boundary: queued real input still runs at the ordinary queue boundary.
+Abort may leave previously accepted input unconsumed; guarded steering neither
+clears it nor automatically resumes it. Omitting `expectedRunId` preserves legacy
+unconditional queueing, including idle queueing.
+
+`runId` is ephemeral session-run identity, unchanged across automatic retries and
+compaction continuations and different for the next prompt/native run. It is not
+persisted and is not a checkpoint or session ID. `agent_settled.runId` identifies
+the run being finalized even if a delayed extension handler overlaps a newer run.
+
+Canonical design: [D-PENDING-001](https://github.com/kojira/pi-discord-gateway/blob/fix/pending-input-terminal-race/docs/design/d-pending-001.md).
+
 #### follow_up
 
 Queue a follow-up message to be processed after the agent finishes. Delivered only when agent has no more tool calls or steering messages. Skill commands and prompt templates are expanded. Extension commands are not allowed (use `prompt` instead).
@@ -208,7 +245,8 @@ Response:
     "sessionName": "my-feature-work",
     "autoCompactionEnabled": true,
     "messageCount": 5,
-    "pendingMessageCount": 0
+    "pendingMessageCount": 0,
+    "capabilities": {"guardedSteer": 1}
   }
 }
 ```
@@ -887,7 +925,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do no
 Emitted when the agent begins processing a prompt.
 
 ```json
-{"type": "agent_start"}
+{"type": "agent_start", "runId": "opaque-run-id"}
 ```
 
 ### agent_end
@@ -907,7 +945,7 @@ Emitted when one low-level agent run completes. Contains all messages generated 
 Emitted after the full session-level run settles. At this point Pi will not continue automatically through retry, compaction retry, or queued follow-up messages.
 
 ```json
-{"type": "agent_settled"}
+{"type": "agent_settled", "runId": "opaque-run-id"}
 ```
 
 ### turn_start / turn_end
