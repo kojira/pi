@@ -1645,7 +1645,7 @@ Add a lazy wrapper `src/api/<api-id>.lazy.ts` (`<name>Api()` via `lazyApi()`) so
 #### 3. Model Generation (`scripts/generate-models.ts`, `scripts/generate-image-models.ts`)
 
 - Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
-- Map chat/tool-capable provider model data to the standardized `Model` interface via `scripts/generate-models.ts`; hydration groups the ignored `src/providers/data/<id>.json` values by API, while stable `src/providers/<id>.models.ts` wrappers derive exact model/API types directly from those JSON keys
+- Map chat/tool-capable provider model data to the standardized `Model` interface via `scripts/generate-models.ts`; generation groups the committed `src/providers/data/<id>.json` snapshot values by API (`pnpm run generate:models` refreshes the snapshot online; builds use it offline), while stable `src/providers/<id>.models.ts` wrappers derive exact model/API types directly from those JSON keys
 - Map image-generation provider model data to the standardized `ImagesModel` interface via `scripts/generate-image-models.ts`
 - Handle provider-specific quirks (pricing format, capability flags, model ID transformations)
 
