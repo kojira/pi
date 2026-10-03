@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 describe("strict model generation", () => {
-	it("recovers omitted handwritten providers from the matching published package", () => {
+	it("generates Together reasoning metadata and recovers omitted handwritten providers from the matching published package", () => {
 		const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-generate-models-retain-"));
 		temporaryRoots.push(fixtureRoot);
 		const isolatedPackageRoot = join(fixtureRoot, "package");
@@ -35,6 +35,19 @@ describe("strict model generation", () => {
 			"qwen3.8-max-preview",
 		];
 		const catalog = {
+			// Historical input: live catalogs may retire this model, but its reasoning mapping must remain tested.
+			together: {
+				models: {
+					"deepseek-ai/DeepSeek-V4-Pro": {
+						id: "deepseek-ai/DeepSeek-V4-Pro",
+						name: "DeepSeek V4 Pro",
+						tool_call: true,
+						reasoning: true,
+					},
+					"fixture-no-tools": { id: "fixture-no-tools", tool_call: false, reasoning: true },
+					"fixture-deprecated": { id: "fixture-deprecated", tool_call: true, status: "deprecated" },
+				},
+			},
 			"alibaba-token-plan": {
 				models: Object.fromEntries(individualModelIds.map((id) => [id, { id, name: id, tool_call: true }])),
 			},
@@ -77,6 +90,30 @@ describe("strict model generation", () => {
 		expect(`${result.stdout}\n${result.stderr}`).toContain(
 			"Live model sources omitted kimi-coding; using 1 model(s) from @earendil-works/pi-ai@0.84.0.",
 		);
+		const together = JSON.parse(readFileSync(join(isolatedPackageRoot, "src/providers/data/together.json"), "utf8"))[
+			"openai-completions"
+		];
+		expect(Object.keys(together)).toEqual(["deepseek-ai/DeepSeek-V4-Pro"]);
+		const deepSeekV4 = together["deepseek-ai/DeepSeek-V4-Pro"];
+		expect(deepSeekV4).toBeDefined();
+		expect(deepSeekV4.thinkingLevelMap).toEqual({
+			minimal: null,
+			low: null,
+			medium: null,
+			high: "high",
+			xhigh: null,
+		});
+		expect(deepSeekV4.compat).toMatchObject({
+			supportsReasoningEffort: true,
+			thinkingFormat: "together",
+		});
+		expect(deepSeekV4).toMatchObject({
+			id: "deepseek-ai/DeepSeek-V4-Pro",
+			provider: "together",
+			api: "openai-completions",
+			baseUrl: "https://api.together.ai/v1",
+			reasoning: true,
+		});
 		const aggregator = readFileSync(join(isolatedPackageRoot, "src/models.generated.ts"), "utf8");
 		expect(aggregator).toContain('import { KIMI_CODING_MODELS } from "./providers/kimi-coding.models.ts";');
 		expect(aggregator).toContain('import { AMAZON_BEDROCK_MODELS } from "./providers/amazon-bedrock.models.ts";');

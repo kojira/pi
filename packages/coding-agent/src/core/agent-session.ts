@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -145,13 +146,14 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
+	| Exclude<AgentEvent, { type: "agent_end" | "agent_start" }>
+	| { type: "agent_start"; runId?: string }
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
 			willRetry: boolean;
 	  }
-	| { type: "agent_settled" }
+	| { type: "agent_settled"; runId: string }
 	| { type: "work_contract"; record: WorkContractRecord }
 	| {
 			type: "queue_update";
@@ -318,6 +320,17 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // AgentSession Class
 // ============================================================================
 
+export type GuardedSteerResult = { accepted: true } | { accepted: false; reason: "run_not_accepting" };
+
+export class SteeringDeliveryUncertainError extends Error {
+	readonly errorCode = "STEER_DELIVERY_UNCERTAIN";
+}
+
+interface SteeringRun {
+	id: string;
+	accepting: boolean;
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -329,6 +342,7 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	private _steeringRun: SteeringRun | undefined;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -697,14 +711,14 @@ export class AgentSession {
 		resolve();
 	}
 
-	private async _emitAgentSettled(): Promise<void> {
+	private async _emitAgentSettled(run: SteeringRun): Promise<void> {
 		this._isAgentRunActive = false;
 		try {
 			try {
 				this._workContractRuntime.onSettled();
 			} finally {
 				await this._extensionRunner.emit({ type: "agent_settled" });
-				this._emit({ type: "agent_settled" });
+				this._emit({ type: "agent_settled", runId: run.id });
 			}
 		} finally {
 			this._resolveIdleWaitIfIdle();
@@ -749,7 +763,13 @@ export class AgentSession {
 		this._workContractRuntime.onEvent(event);
 
 		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		this._emit(
+			event.type === "agent_end"
+				? { ...event, willRetry: this._willRetryAfterAgentEnd(event) }
+				: event.type === "agent_start"
+					? { ...event, runId: this._steeringRun?.id }
+					: event,
+		);
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -961,6 +981,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		if (this._steeringRun) this._steeringRun.accepting = false;
 		this._continuationCancellationGeneration++;
 		this._pendingInLoopCompactionContinuation = false;
 		this._pendingInLoopCompactionSignal = undefined;
@@ -1190,25 +1211,32 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		const run: SteeringRun = { id: randomUUID(), accepting: true };
+		this._steeringRun = run;
 		this._isAgentRunActive = true;
 		this._pendingInLoopCompactionContinuation = false;
 		this._pendingInLoopCompactionSignal = undefined;
 		try {
 			await this.agent.prompt(messages);
-			while (await this._handlePostAgentRun()) {
+			while (await this._handlePostAgentRun(run)) {
 				await this.agent.continue();
 			}
 		} finally {
+			run.accepting = false;
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 			this._pendingInLoopCompactionContinuation = false;
 			this._pendingInLoopCompactionSignal = undefined;
-			await this._emitAgentSettled();
+			await this._emitAgentSettled(run);
 		}
 	}
 
-	private async _handlePostAgentRun(): Promise<boolean> {
+	private async _handlePostAgentRun(run: SteeringRun): Promise<boolean> {
+		const stop = () => {
+			run.accepting = false;
+			return false;
+		};
 		const resumeAfterInLoopCompaction =
 			this._pendingInLoopCompactionContinuation && this._pendingInLoopCompactionSignal?.aborted !== true;
 		this._pendingInLoopCompactionContinuation = false;
@@ -1216,12 +1244,12 @@ export class AgentSession {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		// Cancellation is run state, not a mutation of an already-persisted assistant message.
-		if (this.agent.lastRunAborted) return false;
+		if (this.agent.lastRunAborted) return stop();
 		if (!msg) {
-			return resumeAfterInLoopCompaction;
+			return resumeAfterInLoopCompaction || stop();
 		}
 		// Cancellation must not start a fresh run merely because input remains queued.
-		if (msg.stopReason === "aborted") return false;
+		if (msg.stopReason === "aborted") return stop();
 
 		if (this._isRetryableError(msg) && (await this._prepareRetry(msg))) {
 			return true;
@@ -1247,7 +1275,8 @@ export class AgentSession {
 		// here were queued by agent_end extension handlers and need a continuation.
 		// If in-loop compaction completed but no following assistant response started,
 		// resume once from the preserved tool-result boundary.
-		return resumeAfterInLoopCompaction || this.agent.hasQueuedMessages();
+		// No await between the final queue check and closing guarded admission.
+		return resumeAfterInLoopCompaction || this.agent.hasQueuedMessages() || stop();
 	}
 
 	/**
@@ -1498,6 +1527,52 @@ export class AgentSession {
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueSteer(expandedText, images);
+	}
+
+	/** Accept only into the named consuming run; a successful enqueue is not consumption. */
+	async steerIfActive(text: string, expectedRunId: string, images?: ImageContent[]): Promise<GuardedSteerResult> {
+		const run = this._steeringRun;
+		const canAccept = () =>
+			run !== undefined &&
+			this._steeringRun === run &&
+			run.id === expectedRunId &&
+			run.accepting &&
+			!this.agent.signal?.aborted &&
+			!this.agent.lastRunAborted;
+		if (!canAccept()) return { accepted: false, reason: "run_not_accepting" };
+		if (text.startsWith("/")) this._throwIfExtensionCommand(text);
+		const expandedText = expandPromptTemplate(this._expandSkillCommand(text), [...this.promptTemplates]);
+		const message: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: expandedText }, ...(images ?? [])],
+			timestamp: Date.now(),
+		};
+		const recipient = this._steeringRecipients.at(-1);
+		if (recipient) {
+			let accepted: boolean | undefined;
+			try {
+				accepted = await recipient.steer({ text: expandedText, images, message });
+			} catch (cause) {
+				throw new SteeringDeliveryUncertainError("Steering recipient delivery is uncertain", { cause });
+			}
+			if (accepted !== false) {
+				this._emit({
+					type: "steering_consumed",
+					message: expandedText,
+					target: "recipient",
+					recipientId: recipient.id,
+					recipientLabel: recipient.label,
+				});
+				return { accepted: true };
+			}
+		}
+		// Recipient decline may arrive after finalization, cancellation or a new run.
+		// The recheck and actual enqueue form one synchronous admission boundary.
+		if (!canAccept()) return { accepted: false, reason: "run_not_accepting" };
+		this.agent.steer(message);
+		this._steeringMessages.push(expandedText);
+		this._emitQueueUpdate();
+		return { accepted: true };
 	}
 
 	/**
@@ -1754,6 +1829,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	async abort(): Promise<void> {
+		if (this._steeringRun) this._steeringRun.accepting = false;
 		this._continuationCancellationGeneration++;
 		this._pendingInLoopCompactionContinuation = false;
 		this._pendingInLoopCompactionSignal = undefined;

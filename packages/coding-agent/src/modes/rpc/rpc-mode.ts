@@ -12,6 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
+import { SteeringDeliveryUncertainError } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
@@ -416,6 +417,39 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "steer": {
+				if ("expectedRunId" in command) {
+					if (
+						typeof command.expectedRunId !== "string" ||
+						!command.expectedRunId ||
+						typeof command.message !== "string"
+					) {
+						return {
+							id,
+							type: "response",
+							command: "steer",
+							success: false,
+							errorCode: "INVALID_STEER_REQUEST",
+							error: "Guarded steer requires a nonempty expectedRunId and string message",
+						};
+					}
+					try {
+						return success(
+							id,
+							"steer",
+							await session.steerIfActive(command.message, command.expectedRunId, command.images),
+						);
+					} catch (cause) {
+						if (!(cause instanceof SteeringDeliveryUncertainError)) throw cause;
+						return {
+							id,
+							type: "response",
+							command: "steer",
+							success: false,
+							errorCode: cause.errorCode,
+							error: cause.message,
+						};
+					}
+				}
 				await session.steer(command.message, command.images);
 				return success(id, "steer");
 			}
@@ -461,6 +495,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					capabilities: { guardedSteer: 1 },
 				};
 				return success(id, "get_state", state);
 			}

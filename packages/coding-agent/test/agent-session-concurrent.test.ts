@@ -62,6 +62,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	let streamStarted: Promise<void>;
 
 	beforeEach(async () => {
 		tempDir = join(tmpdir(), `pi-concurrent-test-${Date.now()}`);
@@ -82,6 +83,10 @@ describe("AgentSession concurrent prompt guard", () => {
 	async function createSession() {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
+		let markStreamStarted!: () => void;
+		streamStarted = new Promise<void>((resolve) => {
+			markStreamStarted = resolve;
+		});
 
 		// Use a stream function that responds to abort
 		const agent = new Agent({
@@ -93,6 +98,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 			streamFn: (_model, _context, options) => {
 				abortSignal = options?.signal;
+				markStreamStarted();
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: createAssistantMessage("") });
@@ -157,9 +163,10 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should allow steer() while streaming", async () => {
 		await createSession();
 
-		// Start first prompt
+		// Wait for the actual stream, not a timer that can expire during prompt preflight.
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await streamStarted;
+		expect(session.isStreaming).toBe(true);
 
 		// steer should work while streaming
 		expect(() => session.steer("Steering message")).not.toThrow();

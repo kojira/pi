@@ -158,10 +158,12 @@ const dirtyNode = (): DirtyNode => ({ children: new Map() });
 
 const spliceItems = (target: unknown[], index: number, remove: number, items: JsonValue[]): JsonValue[] => {
 	const removed = Reflect.apply(Array.prototype.splice, target, [index, remove]) as JsonValue[];
-	const chunkSize = 10_000;
-	for (let offset = 0; offset < items.length; offset += chunkSize) {
-		Reflect.apply(Array.prototype.splice, target, [index + offset, 0, ...items.slice(offset, offset + chunkSize)]);
+	if (items.length === 0) return removed;
+	// The caller's arguments are still on the stack, so even chunked spreading can overflow.
+	for (let tail = target.length - 1; tail >= index; tail--) {
+		target[tail + items.length] = target[tail];
 	}
+	for (let offset = 0; offset < items.length; offset++) target[index + offset] = items[offset];
 	return removed;
 };
 
