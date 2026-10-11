@@ -6,3 +6,16 @@ packages:
   - 'packages/coding-agent/examples/extensions/custom-provider-gitlab-duo'
   - 'packages/coding-agent/examples/extensions/sandbox'
   - 'packages/coding-agent/examples/extensions/gondolin'
+
+linkWorkspacePackages: true
+preferWorkspacePackages: true
+
+overrides:
+  shell-quote: 1.12.0
+  '@modelcontextprotocol/sdk': 1.31.0
+
+auditConfig:
+  ignoreGhsas:
+    # node-forge has no patched release yet (latest 1.4.0); only reached via the
+    # example gondolin extension, not the coding-agent runtime.
+    - GHSA-86w9-cpqp-85rv
