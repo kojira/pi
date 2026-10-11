@@ -18,4 +18,5 @@ auditConfig:
   ignoreGhsas:
     # node-forge has no patched release yet (latest 1.4.0); only reached via the
     # example gondolin extension, not the coding-agent runtime.
+    # TODO: remove once node-forge ships a fix (>1.4.0) and bump gondolin.
     - GHSA-86w9-cpqp-85rv
