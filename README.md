@@ -52,14 +52,37 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.m
 
 ## Development
 
+Install [mise](https://mise.jdx.dev/) first. The tracked `.mise.toml` pins Node
+**22.23.4** and retains pnpm **11.14.0**. No shell activation or nvm is required.
+
 ```bash
-pnpm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
-pnpm run build         # Refresh model data, then build all packages
-pnpm run build:offline # Rebuild using existing model data without network access
-pnpm run check         # Lint, format, and type check
-./test.sh              # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh           # Run pi from sources (can be run from any directory)
+mise trust
+mise install
+mise exec -- pnpm install --frozen-lockfile --ignore-scripts
+mise exec -- pnpm run build         # Build using committed model data
+mise exec -- pnpm run build:offline # Rebuild using existing model data
+mise exec -- pnpm run check
+mise exec -- node --test scripts/node.integration.mjs # Real mise selection
+mise exec -- ./test.sh              # Isolated, no provider credentials
+./pi-test.sh                        # Managed Node; preserves caller directory
 ```
+
+For a built checkout, run `./scripts/node.sh packages/coding-agent/dist/bundle/cli.js`.
+The same launcher accepts an absolute installed CLI JavaScript path, so a service
+can keep its reviewed application artifacts while selecting this checkout's Node.
+It resolves `mise which node` against this checkout, preserves arguments and the
+caller's working directory, and prepends the selected Node directory to child
+`PATH`. Keep `mise` on the service's explicit PATH; run `mise install` before use.
+Missing managed runtimes fail rather than falling back to an ambient Node.
+
+Changing the pin does not update running processes or wrappers with hardcoded
+Node paths. During an approved maintenance window, back up existing selectors,
+point launchers at the managed Node/CLI, drain work, and recreate persistent RPC
+and child processes. Verify their loaded executables, not only `node --version`
+in a terminal. Keep the previous runtime, application artifacts and selectors
+for rollback; restoring an older vulnerable runtime is temporary recovery, not
+completion of the security update. Do not rebuild native addons unless their
+compatibility check fails. Node 22.23.2 and 22.23.4 both use module ABI 127.
 
 ## Building standalone binaries from release source
 
