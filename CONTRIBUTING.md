@@ -57,11 +57,11 @@ If you send a large volume of issues through automation, your GitHub account wil
 
 Do not open a PR unless you have already been approved by a maintainer using `lgtm` in the command position described above.
 
-Before submitting a PR:
+Before submitting a PR (see the README for the pinned mise setup):
 
 ```bash
-pnpm run check
-./test.sh
+mise exec -- pnpm run check
+mise exec -- ./test.sh
 ```
 
 Both must pass.
