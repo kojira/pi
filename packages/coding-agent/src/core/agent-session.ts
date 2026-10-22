@@ -48,12 +48,14 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { estimateContextTokens as estimateRequestTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { BoundedCompactionError } from "./compaction/bounded-compaction.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -99,13 +101,14 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
-import { getLatestCompactionEntry } from "./session-manager.ts";
+import { buildSessionContext, getLatestCompactionEntry } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -115,7 +118,8 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import type { WorkContractRecord } from "./work-contract.ts";
-import { WorkContractRuntime } from "./work-contract-runtime.ts";
+import { ACTIVE_WORK_PROMPT, CONTINUATION_USER_TEXT, WorkContractRuntime } from "./work-contract-runtime.ts";
+import { WORK_CONTROL_PROMPT } from "./work-control-response.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -603,7 +607,7 @@ export class AgentSession {
 			if (latestUserId && latestModelChangeId) break;
 		}
 		if (!latestUserId) return undefined;
-		return `${this.model.provider}\0${this.model.id}\0${latestModelChangeId ?? ""}\0${compaction?.id ?? ""}\0${latestUserId}`;
+		return `${this.model.provider}\0${this.model.id}\0${latestModelChangeId ?? ""}\0${compaction?.id ?? ""}\0${latestUserId}\0${JSON.stringify({ compaction: this.settingsManager.getCompactionSettings(), contextWindow: this.model.contextWindow, maxTokens: this.model.maxTokens, thinking: this.thinkingLevel })}`;
 	}
 
 	private async _compactBeforeNextAssistantResponse(
@@ -2112,6 +2116,68 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
+	/** Identity only; do not execute request/extension callbacks to preview a future turn. */
+	private _compactionSnapshot(): string {
+		return JSON.stringify({
+			leaf: this.sessionManager.getLeafId(),
+			model: this.model,
+			thinking: this.thinkingLevel,
+			settings: this.settingsManager.getCompactionSettings(),
+			retry: this.settingsManager.getRetrySettings(),
+			providerRetry: this.settingsManager.getProviderRetrySettings(),
+			system: this.agent.state.systemPrompt,
+			tools: this.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
+		});
+	}
+
+	private _assertCompactionSnapshot(snapshot: string): void {
+		if (snapshot !== this._compactionSnapshot())
+			throw new BoundedCompactionError("stale branch/model/settings changed during summarization");
+	}
+
+	/** Native next-turn headroom, NOT a preview of arbitrary dynamic extension/new-user input. */
+	private _validateCompactedContext(preparation: CompactionPreparation, summary: string): void {
+		const model = this.model;
+		if (!model || model.contextWindow <= 0 || model.maxTokens <= 0)
+			throw new BoundedCompactionError("next-turn model/output allowance is invalid");
+		const hypothetical: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-budget-preview",
+			parentId: this.sessionManager.getLeafId(),
+			timestamp: new Date().toISOString(),
+			summary,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			fromHook: false,
+		};
+		const messages = buildSessionContext([...this.sessionManager.getBranch(), hypothetical]).messages;
+		// Ignore stale provider usage when estimating a hypothetical native rebuild.
+		const llmMessages = convertToLlm([...messages, ...this._pendingNextTurnMessages]).map((message) =>
+			message.role === "assistant"
+				? {
+						...message,
+						usage: { ...message.usage, totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					}
+				: message,
+		);
+		const context = {
+			systemPrompt: `${this.agent.state.systemPrompt}\n${ACTIVE_WORK_PROMPT}\n${WORK_CONTROL_PROMPT}`,
+			tools: this.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
+			messages: [...llmMessages, { role: "user" as const, content: CONTINUATION_USER_TEXT, timestamp: Date.now() }],
+		};
+		const input =
+			Math.max(estimateRequestTokens(context).tokens, Math.ceil(JSON.stringify(context).length / 4)) + 4096;
+		const slack = Math.max(4096, Math.ceil(model.contextWindow * 0.05));
+		if (
+			input + model.maxTokens + slack >= model.contextWindow ||
+			input >= model.contextWindow - preparation.settings.reserveTokens
+		) {
+			throw new BoundedCompactionError(
+				"retained tail/system/tools leave insufficient native next-turn headroom; kept boundary unchanged",
+			);
+		}
+	}
+
 	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
@@ -2123,7 +2189,8 @@ export class AgentSession {
 		env: Record<string, string> | undefined,
 		reason: "manual" | "threshold" | "overflow",
 	): Promise<CompactionResult> {
-		return compact(
+		this._validateCompactedContext(preparation, "");
+		const result = await compact(
 			preparation,
 			requestModel,
 			apiKey,
@@ -2137,6 +2204,9 @@ export class AgentSession {
 			this._summarizationRetryCallbacks({ source: "compaction", reason }),
 			undefined, // sessionId
 		);
+		signal.throwIfAborted();
+		this._validateCompactedContext(preparation, result.summary);
+		return result;
 	}
 
 	private _clearManualCompactionState(): void {
@@ -2175,6 +2245,7 @@ export class AgentSession {
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
 
+			const compactionSnapshot = this._compactionSnapshot();
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
 				// Check why we can't compact
@@ -2222,6 +2293,7 @@ export class AgentSession {
 				usage = extensionCompaction.usage;
 				details = extensionCompaction.details;
 			} else {
+				this._assertCompactionSnapshot(compactionSnapshot);
 				// Shared default summary generator, also used by automatic compaction.
 				const result = await this._runDefaultCompaction(
 					preparation,
@@ -2244,6 +2316,7 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
+			if (!fromExtension) this._assertCompactionSnapshot(compactionSnapshot);
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.sessionManager.buildSessionContext();
@@ -2477,6 +2550,7 @@ export class AgentSession {
 
 			const pathEntries = this.sessionManager.getBranch();
 
+			const compactionSnapshot = this._compactionSnapshot();
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
 				return false;
@@ -2536,6 +2610,7 @@ export class AgentSession {
 				usage = extensionCompaction.usage;
 				details = extensionCompaction.details;
 			} else {
+				this._assertCompactionSnapshot(compactionSnapshot);
 				// Shared default summary generator, also used by manual compaction.
 				const compactResult = await this._runDefaultCompaction(
 					preparation,
@@ -2571,6 +2646,7 @@ export class AgentSession {
 				return false;
 			}
 
+			if (!fromExtension) this._assertCompactionSnapshot(compactionSnapshot);
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			this._failedThresholdSummaryKey = undefined;
 			this._autoCompactionGeneration++;
@@ -2622,12 +2698,16 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const aborted =
+				this._autoCompactionAbortController?.signal.aborted === true ||
+				(error instanceof Error && error.name === "AbortError");
 			// Keep reporting the first failure, but avoid spending the same output
 			// budget again after every tool result in this user turn. New user input,
 			// a model switch, and an explicit successful compact all permit retry.
 			if (
 				reason === "threshold" &&
-				errorMessage.includes("generation hit the token cap and the summary is incomplete")
+				(error instanceof BoundedCompactionError ||
+					errorMessage.includes("generation hit the token cap and the summary is incomplete"))
 			) {
 				this._failedThresholdSummaryKey = this._thresholdSummaryKey();
 			}
@@ -2640,14 +2720,14 @@ export class AgentSession {
 					type: "compaction_end",
 					reason,
 					result: undefined,
-					aborted: false,
+					aborted,
 					willRetry: false,
-					errorMessage: formattedErrorMessage,
+					errorMessage: aborted ? undefined : formattedErrorMessage,
 				});
 				await this._emitSessionCompactFailed({
 					reason,
-					errorMessage: formattedErrorMessage,
-					aborted: false,
+					errorMessage: aborted ? undefined : formattedErrorMessage,
+					aborted,
 					willRetry: false,
 					fromExtension,
 				});

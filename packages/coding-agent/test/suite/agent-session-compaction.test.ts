@@ -11,6 +11,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateTokens, generateSummaryWithUsage } from "../../src/core/compaction/index.ts";
+import { structuredSummary } from "../compaction-fixture.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
 
@@ -66,7 +67,9 @@ function useSummaryStreamFn(
 		const stream = createAssistantMessageEventStream();
 		queueMicrotask(() => {
 			const message: AssistantMessage = {
-				...fauxAssistantMessage(summary),
+				...fauxAssistantMessage(
+					JSON.stringify(context).includes("<source-data>") ? structuredSummary(summary) : summary,
+				),
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
@@ -273,7 +276,7 @@ describe("AgentSession compaction characterization", () => {
 			(_context, options) => {
 				expect(options?.apiKey).toBeUndefined();
 				expect(options?.headers).toEqual({ Authorization: "Bearer ambient-token" });
-				return fauxAssistantMessage("summary with bearer auth");
+				return fauxAssistantMessage(structuredSummary("summary with bearer auth"));
 			},
 		]);
 
@@ -305,7 +308,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(transformContext).not.toHaveBeenCalled();
 		expect(requestContext?.systemPrompt).not.toBe(harness.session.agent.state.systemPrompt);
 		expect(requestContext?.tools).toBeUndefined();
-		expect(JSON.stringify(requestContext?.messages)).toContain("<conversation>");
+		expect(JSON.stringify(requestContext?.messages)).toContain("<source-data>");
 		expect(requestOptions).toMatchObject({ cacheRetention: "none" });
 		expect(requestOptions?.sessionId).not.toBe("active-routing-session");
 		expect(requestOptions?.transport).toBeUndefined();
@@ -373,7 +376,7 @@ describe("AgentSession compaction characterization", () => {
 			reason: "threshold",
 			aborted: false,
 			willRetry: false,
-			errorMessage: "Auto-compaction failed: summary generator blew up",
+			errorMessage: "Auto-compaction failed: Summarization failed: summary generator blew up",
 		});
 		expect(failedEvents).toEqual([
 			expect.objectContaining({
@@ -382,7 +385,7 @@ describe("AgentSession compaction characterization", () => {
 				aborted: false,
 				willRetry: false,
 				fromExtension: false,
-				errorMessage: "Auto-compaction failed: summary generator blew up",
+				errorMessage: "Auto-compaction failed: Summarization failed: summary generator blew up",
 			}),
 		]);
 	});

@@ -6,6 +6,7 @@ import {
 	type Provider,
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { structuredSummary } from "../../compaction-fixture.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const INDIVIDUAL_BASE_URL = "https://api.individual.githubcopilot.com";
@@ -60,7 +61,7 @@ describe("issue #6768 Copilot compaction base URL", () => {
 				type: "done",
 				reason: "stop",
 				message: {
-					...fauxAssistantMessage("summary"),
+					...fauxAssistantMessage(structuredSummary("summary")),
 					api: requestModel.api,
 					provider: requestModel.provider,
 					model: requestModel.id,

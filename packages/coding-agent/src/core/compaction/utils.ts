@@ -156,3 +156,64 @@ export function serializeConversation(messages: Message[]): string {
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
+
+/** Summary-only projection; offsets refer to this block, never stored-message edits. */
+export interface SummarySource {
+	sourceIndex: number;
+	entryId?: string;
+	blockIndex: number;
+	role: string;
+	text: string;
+	format: "prose" | "code/log";
+	fenceLanguage?: string;
+	toolCallId?: string;
+	toolName?: string;
+	isError?: boolean;
+	chronology?: "before current span";
+	phase?: "history" | "split-turn prefix";
+	truncated?: boolean;
+}
+
+/** Opt-in source ledger. The public/branch serializeConversation defaults stay unchanged. */
+export function serializeSummarySources(messages: Message[], firstIndex: number, entryIds?: string[]): SummarySource[] {
+	const result: SummarySource[] = [];
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
+		const projectedContent = message.role === "toolResult" ? contentText(message.content, "") : message.content;
+		const blocks =
+			typeof projectedContent === "string" ? [{ type: "text" as const, text: projectedContent }] : projectedContent;
+		for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+			const block = blocks[blockIndex];
+			let text = "";
+			if (block.type === "text") text = block.text;
+			else if (block.type === "thinking") text = block.thinking;
+			else if (block.type === "toolCall") text = JSON.stringify(block.arguments);
+			else if (block.type === "image") text = "[Image omitted from summary-only text projection]";
+			let truncated = false;
+			if (message.role === "toolResult" && text.length > TOOL_RESULT_MAX_CHARS) {
+				// Retain legacy 2000-char reduction, without producing a lone surrogate.
+				const end = /[\uD800-\uDBFF]/u.test(text[TOOL_RESULT_MAX_CHARS - 1])
+					? TOOL_RESULT_MAX_CHARS - 1
+					: TOOL_RESULT_MAX_CHARS;
+				text = `${text.slice(0, end)}\n\n[... ${text.length - end} more characters truncated; omitted content was not read]`;
+				truncated = true;
+			}
+			const fence = text.match(/```([^\r\n]*)/u);
+			result.push({
+				sourceIndex: firstIndex + i,
+				entryId: entryIds?.[i],
+				blockIndex,
+				role: message.role === "assistant" && block.type === "thinking" ? "assistant thinking" : message.role,
+				text,
+				format: fence || block.type === "toolCall" || message.role === "toolResult" ? "code/log" : "prose",
+				...(fence ? { fenceLanguage: Array.from(fence[1]).slice(0, 80).join("") } : {}),
+				...(block.type === "toolCall" ? { toolCallId: block.id, toolName: block.name } : {}),
+				...(message.role === "toolResult"
+					? { toolCallId: message.toolCallId, toolName: message.toolName, isError: message.isError }
+					: {}),
+				...(truncated ? { truncated } : {}),
+			});
+		}
+	}
+	return result;
+}

@@ -16,6 +16,7 @@ import {
 	type SessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
+import { BoundedCompactionError, generateBoundedSummary, validateBoundedSummary } from "./bounded-compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -23,7 +24,9 @@ import {
 	type FileOperations,
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
+	type SummarySource,
 	serializeConversation,
+	serializeSummarySources,
 } from "./utils.ts";
 
 // ============================================================================
@@ -94,29 +97,6 @@ export interface CompactionResult<T = unknown> {
 	usage?: Usage;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
-}
-
-function combineUsage(first: Usage, second: Usage): Usage {
-	return {
-		input: first.input + second.input,
-		output: first.output + second.output,
-		cacheRead: first.cacheRead + second.cacheRead,
-		cacheWrite: first.cacheWrite + second.cacheWrite,
-		...(first.cacheWrite1h !== undefined || second.cacheWrite1h !== undefined
-			? { cacheWrite1h: (first.cacheWrite1h ?? 0) + (second.cacheWrite1h ?? 0) }
-			: {}),
-		...(first.reasoning !== undefined || second.reasoning !== undefined
-			? { reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0) }
-			: {}),
-		totalTokens: first.totalTokens + second.totalTokens,
-		cost: {
-			input: first.cost.input + second.cost.input,
-			output: first.cost.output + second.cost.output,
-			cacheRead: first.cost.cacheRead + second.cost.cacheRead,
-			cacheWrite: first.cost.cacheWrite + second.cost.cacheWrite,
-			total: first.cost.total + second.cost.total,
-		},
-	};
 }
 
 // ============================================================================
@@ -782,6 +762,8 @@ export interface CompactionPreparation {
 	tokensBefore: number;
 	/** Summary from previous compaction, for iterative update */
 	previousSummary?: string;
+	/** Native source identities for summary-only provenance. */
+	sourceEntryIds?: string[];
 	/** File operations extracted from messagesToSummarize */
 	fileOps: FileOperations;
 	/** Compaction settions from settings.jsonl	*/
@@ -809,6 +791,19 @@ export function prepareCompaction(
 	if (prevCompactionIndex >= 0) {
 		const prevCompaction = pathEntries[prevCompactionIndex] as CompactionEntry;
 		previousSummary = prevCompaction.summary;
+		if (prevCompaction.fromHook === false && isCompactionDetails(prevCompaction.details)) {
+			const details = prevCompaction.details;
+			const legacySuffix = formatFileOperations(details.readFiles, details.modifiedFiles);
+			// A preview contains a recognizable footer; verify complete exact formatter output.
+			const marker = prevCompaction.summary.lastIndexOf("\n\n<file-preview>");
+			if (legacySuffix && previousSummary.endsWith(legacySuffix))
+				previousSummary = previousSummary.slice(0, -legacySuffix.length);
+			else if (marker >= 0) {
+				const body = previousSummary.slice(0, marker);
+				// Preview includes its selection order, so validate only with the persisted native details.
+				if (recognizedFilePreview(previousSummary.slice(marker), details, body)) previousSummary = body;
+			}
+		}
 		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
 		boundaryStart = firstKeptEntryIndex >= 0 ? firstKeptEntryIndex : prevCompactionIndex + 1;
 	}
@@ -864,6 +859,12 @@ export function prepareCompaction(
 		isSplitTurn: cutPoint.isSplitTurn,
 		tokensBefore,
 		previousSummary,
+		sourceEntryIds: [
+			...pathEntries.slice(boundaryStart, historyEnd),
+			...(cutPoint.isSplitTurn ? pathEntries.slice(cutPoint.turnStartIndex, cutPoint.firstKeptEntryIndex) : []),
+		]
+			.filter((e) => getMessageFromEntryForCompaction(e) !== undefined)
+			.map((e) => e.id),
 		fileOps,
 		settings,
 	};
@@ -872,21 +873,6 @@ export function prepareCompaction(
 // ============================================================================
 // Main compaction function
 // ============================================================================
-
-const TURN_PREFIX_SUMMARIZATION_PROMPT = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
-
-Summarize the prefix to provide context for the retained suffix:
-
-## Original Request
-[What did the user ask for in this turn?]
-
-## Early Progress
-- [Key decisions and work done in the prefix]
-
-## Context for Suffix
-- [Information needed to understand the retained recent work]
-
-Be concise. Focus on what's needed to understand the kept suffix.`;
 
 /**
  * Generate summaries for compaction using prepared data.
@@ -910,151 +896,166 @@ export async function compact(
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
 ): Promise<CompactionResult> {
-	const {
-		firstKeptEntryId,
-		messagesToSummarize,
-		turnPrefixMessages,
-		isSplitTurn,
-		tokensBefore,
-		previousSummary,
-		fileOps,
-		settings,
-	} = preparation;
-
-	// Generate summaries and merge into one
-	let summary: string;
-	let summaryUsage: Usage;
-
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
-		let historyText = "No prior history.";
-		let historyUsage: Usage | undefined;
-		if (messagesToSummarize.length > 0) {
-			const historyResult = await generateSummaryWithUsage(
-				messagesToSummarize,
-				model,
-				settings.reserveTokens,
-				apiKey,
-				headers,
-				signal,
-				customInstructions,
-				previousSummary,
-				thinkingLevel,
-				streamFn,
-				env,
-				retry,
-				callbacks,
-				sessionId,
-			);
-			historyText = historyResult.text;
-			historyUsage = historyResult.usage;
-		}
-		const turnPrefixResult = await generateTurnPrefixSummary(
-			turnPrefixMessages,
-			model,
-			settings.reserveTokens,
-			apiKey,
-			headers,
-			env,
-			signal,
-			thinkingLevel,
-			streamFn,
-			retry,
-			callbacks,
-			sessionId,
-		);
-		// Merge into single summary
-		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
-		summaryUsage = historyUsage ? combineUsage(historyUsage, turnPrefixResult.usage) : turnPrefixResult.usage;
-	} else {
-		// Just generate history summary
-		const result = await generateSummaryWithUsage(
-			messagesToSummarize,
-			model,
-			settings.reserveTokens,
-			apiKey,
-			headers,
-			signal,
-			customInstructions,
-			previousSummary,
-			thinkingLevel,
-			streamFn,
-			env,
-			retry,
-			callbacks,
-			sessionId,
-		);
-		summary = result.text;
-		summaryUsage = result.usage;
+	const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+	const sources: SummarySource[] = [];
+	if (preparation.previousSummary !== undefined)
+		sources.push({
+			sourceIndex: 0,
+			blockIndex: 0,
+			role: "previous summary",
+			text: preparation.previousSummary,
+			format: "prose",
+			chronology: "before current span",
+		});
+	const previousCount = sources.length;
+	for (const source of serializeSummarySources(convertToLlm(messages), previousCount, preparation.sourceEntryIds)) {
+		sources.push({
+			...source,
+			phase:
+				preparation.isSplitTurn && source.sourceIndex - previousCount >= preparation.messagesToSummarize.length
+					? "split-turn prefix"
+					: "history",
+		});
 	}
-
-	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
-
-	if (!firstKeptEntryId) {
-		throw new Error("First kept entry has no UUID - session may need migration");
-	}
-
+	const result = await generateBoundedSummary(sources, {
+		model,
+		reserveTokens: preparation.settings.reserveTokens,
+		apiKey,
+		headers,
+		customInstructions,
+		signal,
+		thinkingLevel,
+		streamFn,
+		env,
+		retry,
+		callbacks,
+		sessionId,
+	});
+	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
+	const summary = result.text + boundedFilePreview(readFiles, modifiedFiles, messages, result.text);
+	validateFinalSummary(summary);
+	if (!preparation.firstKeptEntryId) throw new BoundedCompactionError("first kept entry has no UUID");
 	return {
 		summary,
-		firstKeptEntryId,
-		tokensBefore,
-		usage: summaryUsage,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		firstKeptEntryId: preparation.firstKeptEntryId,
+		tokensBefore: preparation.tokensBefore,
+		usage: result.usage,
+		details: { readFiles, modifiedFiles } satisfies CompactionDetails,
 	};
 }
 
-/**
- * Generate a summary for a turn prefix (when splitting a turn).
- */
-async function generateTurnPrefixSummary(
-	messages: AgentMessage[],
-	model: Model<any>,
-	reserveTokens: number,
-	apiKey: string | undefined,
-	headers?: Record<string, string>,
-	env?: Record<string, string>,
-	signal?: AbortSignal,
-	thinkingLevel?: ThinkingLevel,
-	streamFn?: StreamFn,
-	retry?: RetryPolicy,
-	callbacks?: RetryCallbacks,
-	sessionId?: string,
-): Promise<{ text: string; usage: Usage }> {
-	const maxTokens = Math.min(
-		Math.floor(0.5 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	); // Smaller budget for turn prefix
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-
-	const response = await completeSummarization(
-		model,
-		buildSummarizationContext(promptText),
-		createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel, sessionId),
-		streamFn,
-		retry,
-		callbacks,
+function isCompactionDetails(value: unknown): value is CompactionDetails {
+	if (!value || typeof value !== "object" || !("readFiles" in value) || !("modifiedFiles" in value)) return false;
+	return (
+		Array.isArray(value.readFiles) &&
+		value.readFiles.every((f) => typeof f === "string") &&
+		Array.isArray(value.modifiedFiles) &&
+		value.modifiedFiles.every((f) => typeof f === "string")
 	);
+}
 
-	const failure = getSummarizationFailure(response, "Turn prefix summarization");
-	if (failure) {
-		if (response.stopReason === "length") {
-			throw lengthStopWithMetrics(failure, response, maxTokens, conversationText.length, 0, [
-				"Original Request",
-				"Early Progress",
-				"Context for Suffix",
-			]);
-		}
-		throw new Error(failure);
+/** Full lists stay in existing details. Preview order is last-reference-first, modified wins ties. */
+function boundedFilePreview(
+	readFiles: string[],
+	modifiedFiles: string[],
+	messages: AgentMessage[],
+	body: string,
+): string {
+	if (!readFiles.length && !modifiedFiles.length) return "";
+	const recency = new Map<string, number>();
+	messages.forEach((m, index) => {
+		if (m.role === "assistant")
+			for (const block of m.content) {
+				if (
+					block.type === "toolCall" &&
+					["read", "write", "edit"].includes(block.name) &&
+					typeof block.arguments.path === "string"
+				)
+					recency.set(block.arguments.path, index);
+			}
+	});
+	const candidates = [
+		...modifiedFiles.map((path) => ({ path, modified: true })),
+		...readFiles.map((path) => ({ path, modified: false })),
+	].sort(
+		(a, b) =>
+			(recency.get(b.path) ?? -1) - (recency.get(a.path) ?? -1) ||
+			Number(b.modified) - Number(a.modified) ||
+			(a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+	);
+	const selected: typeof candidates = [];
+	const render = () =>
+		`\n\n<file-preview>\n${JSON.stringify({ readTotal: readFiles.length, modifiedTotal: modifiedFiles.length, references: selected, omitted: candidates.length - selected.length })}\nFull cumulative lists are stored in this native compaction entry's details (SDK getEntry/getEntries; RPC get_entries). This is a partial recency preview, not a complete inventory.\n</file-preview>`;
+	for (const candidate of candidates) {
+		selected.push(candidate);
+		const preview = render();
+		if (
+			Math.ceil(preview.length / 4) > 2048 ||
+			Buffer.byteLength(preview) > 8192 ||
+			Math.ceil((body.length + preview.length) / 4) > 4096 ||
+			Buffer.byteLength(body + preview) > 16384
+		)
+			selected.pop();
 	}
-	if (response.content.some((block) => block.type === "toolCall")) {
-		throw new Error("Turn prefix summarization attempted to call a tool");
-	}
+	const preview = render();
+	if (Buffer.byteLength(body + preview) > 16384 || Math.ceil((body.length + preview.length) / 4) > 4096)
+		throw new BoundedCompactionError("final metadata notice cannot fit");
+	return preview;
+}
 
-	return {
-		text: contentText(response.content),
-		usage: response.usage,
-	};
+/** Only a native entry with matching details and an exact terminal formatter suffix is eligible. */
+function recognizedFilePreview(suffix: string, details: CompactionDetails, body: string): boolean {
+	try {
+		const line = suffix.split("\n")[3];
+		const parsed: unknown = JSON.parse(line);
+		if (!parsed || typeof parsed !== "object" || !("references" in parsed) || !Array.isArray(parsed.references))
+			return false;
+		// Reconstruct last-reference ordering as a formatter input, not a permissive XML regex.
+		const messages: AgentMessage[] = parsed.references
+			.slice()
+			.reverse()
+			.map((reference) => {
+				if (
+					!reference ||
+					typeof reference.path !== "string" ||
+					typeof reference.modified !== "boolean" ||
+					!(reference.modified ? details.modifiedFiles : details.readFiles).includes(reference.path)
+				)
+					throw new Error("invalid reference");
+				return {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "preview",
+							name: reference.modified ? "edit" : "read",
+							arguments: { path: reference.path },
+						},
+					],
+					api: "preview",
+					provider: "preview",
+					model: "preview",
+					timestamp: 0,
+					stopReason: "toolUse",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				};
+			});
+		return suffix === boundedFilePreview(details.readFiles, details.modifiedFiles, messages, body);
+	} catch {
+		return false;
+	}
+}
+
+function validateFinalSummary(summary: string): void {
+	const marker = summary.lastIndexOf("\n\n<file-preview>");
+	validateBoundedSummary(marker < 0 ? summary : summary.slice(0, marker));
+	if (Buffer.byteLength(summary) > 16384 || Math.ceil(summary.length / 4) > 4096)
+		throw new BoundedCompactionError("final checkpoint exceeds output budget");
 }

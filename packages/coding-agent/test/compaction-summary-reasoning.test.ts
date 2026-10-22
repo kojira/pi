@@ -9,6 +9,8 @@ import {
 	generateSummaryWithUsage,
 } from "../src/core/compaction/index.ts";
 
+import { structuredSummary } from "./compaction-fixture.ts";
+
 const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
 }));
@@ -128,7 +130,11 @@ describe("generateSummary reasoning options", () => {
 		});
 	});
 
-	it("preserves the standalone split-turn summary prompt", async () => {
+	it("uses one bounded structured source request for a fitting split turn", async () => {
+		completeSimpleMock.mockResolvedValue({
+			...mockSummaryResponse,
+			content: [{ type: "text", text: structuredSummary() }],
+		});
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
 			messagesToSummarize: [],
@@ -136,15 +142,15 @@ describe("generateSummary reasoning options", () => {
 			isSplitTurn: true,
 			tokensBefore: 100,
 			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+			settings: { enabled: true, reserveTokens: 4096, keepRecentTokens: 20 },
 		};
 
 		await compact(preparation, createModel(false), "test-key");
 
 		const requestContext = completeSimpleMock.mock.calls[0][1] as Context;
 		const prompt = JSON.stringify(requestContext.messages);
-		expect(prompt).toContain("This is the PREFIX of a turn that was too large to keep");
-		expect(prompt).toContain("<conversation>");
+		expect(prompt).toContain("Each leaf owns only its labelled owned spans");
+		expect(prompt).toContain("<source-data>");
 	});
 
 	it("rejects tool calls from conversation summaries", async () => {
@@ -164,12 +170,10 @@ describe("generateSummary reasoning options", () => {
 			isSplitTurn: true,
 			tokensBefore: 100,
 			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+			settings: { enabled: true, reserveTokens: 4096, keepRecentTokens: 20 },
 		};
 
-		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow(
-			"Turn prefix summarization attempted to call a tool",
-		);
+		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow("tools are not allowed");
 	});
 
 	it("rejects a length-limited history summary with content-free usage metrics", async () => {
@@ -231,11 +235,11 @@ describe("generateSummary reasoning options", () => {
 			isSplitTurn: true,
 			tokensBefore: 100,
 			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+			settings: { enabled: true, reserveTokens: 4096, keepRecentTokens: 20 },
 		};
 
 		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow(
-			/cap=1000, output=10, textChars=\d+, sectionsSeen=1\/3, conversationChars=\d+, previousChars=0/,
+			/generation hit the token cap and the summary is incomplete/,
 		);
 	});
 
@@ -306,7 +310,11 @@ describe("generateSummary reasoning options", () => {
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("refusalFallbacks");
 	});
 
-	it("clamps compaction summary maxTokens to the model output cap", async () => {
+	it("caps a fitting combined history/prefix request at 8192", async () => {
+		completeSimpleMock.mockResolvedValue({
+			...mockSummaryResponse,
+			content: [{ type: "text", text: structuredSummary() }],
+		});
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
 			messagesToSummarize: messages,
@@ -321,11 +329,11 @@ describe("generateSummary reasoning options", () => {
 
 		expect(result.usage).toEqual({
 			...mockSummaryResponse.usage,
-			input: 20,
-			output: 20,
-			totalTokens: 40,
+			input: 10,
+			output: 10,
+			totalTokens: 20,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		});
-		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([8192]);
 	});
 });

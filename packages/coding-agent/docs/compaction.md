@@ -42,7 +42,7 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 
 1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`) is reached
 2. **Extract messages**: Collect messages from the previous kept boundary (or session start) up to the cut point
-3. **Generate summary**: Call LLM to summarize with structured format, passing the previous summary as iterative context when present
+3. **Generate summary**: Bound the fully constructed summary request, including previous summary, instructions and wrappers. Use one request if it fits; otherwise split the summary-only text into chronological structural leaves and reduce adjacent pairs serially. Validate every output before using it.
 4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
 5. **Rebuilds context**: Session rebuilds the context for the next request, using summary + messages from `firstKeptEntryId` onwards
 
@@ -104,9 +104,21 @@ Split turn (one huge turn exceeds budget):
   turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
 ```
 
-For split turns, Pi generates two summaries and merges them:
-1. **History summary**: Previous context (if any)
-2. **Turn prefix summary**: The early part of the split turn
+For split turns, the previous summary is the oldest source, followed by history and the turn prefix. Fitting input uses one bounded request. Oversized input uses the same structural leaves and adjacent reduction; the retained raw suffix is not counted as new coverage.
+
+### Size bounds and failure boundaries
+
+The built-in native compactor follows [D-COMP-002](D-COMP-002.md). Branch summaries and extension-supplied compaction results retain their existing ownership paths; the direct standalone `generateSummary` APIs are not native compaction jobs.
+
+- Each fully constructed leaf or two-child merge is limited to 48,000 estimated input tokens and 128,000 UTF-8 bytes, additionally constrained by model context, output allowance and safety margin. The caller output cap is at most 8192, half the configured reserve and the positive model output limit; fewer than 1024 tokens fails before requests. Known adapter-added reasoning allowance is reserved separately without changing reasoning policy; unknown reasoning expansion fails preflight.
+- Whole messages and assistant/tool-result groups are preferred. Oversized records use paragraphs/newlines, Japanese sentence hints for prose, then code-point-safe measured splits. Each disjoint owned span has source indices, entry IDs when available and UTF-16 offsets. Preceding overlap is labelled context-only and capped at 512 estimated tokens and 2048 bytes; overlap consumes actual input/usage but never new coverage. No Japanese NLP dependency is required.
+- Outputs must be complete nonempty plain structured text, at most 4096 estimated tokens and 16,384 bytes. Length stops, tool calls, empty, malformed, aborted and oversized responses are rejected, not trimmed into success. Outputs include an `Updates & Sources` section for chronological changes and uncertainty.
+- The full cumulative file lists remain in native entry `details`. The LLM sees only a bounded recent-reference preview with total/omitted counts (at most 2048 estimated tokens and 8192 bytes, within the final 16,384-byte checkpoint). Long paths may be omitted, never sliced. SDK `getEntry`/`getEntries` and RPC `get_entries` retrieve full details; there is no implicit model tool for retrieving them. Only an exactly recognized native terminal suffix agreeing with details is removed from a subsequent summary prompt. User-authored and extension-owned lookalikes remain data.
+- One job has at most 32 leaves, 31 serial adjacent merges, depth 5, 64 physical attempts including retries, 2,000,000 cumulative estimated input tokens, 524,288 reserved output tokens and an eight-minute deadline including backoff. These are resource ceilings, not authorization for paid calls. Provider retries are disabled only on these requests; bounded transient retries and Retry-After remain inside the job ceiling. Terminal invalid/auth/billing/quota failures do not trigger fallback. Validated siblings live only in memory during that attempt; no persisted journal or automatic restart/resume is added.
+- Native next-turn headroom is checked using an in-memory native context rebuild, current available system/tools, known work-control strings, pending next-turn context, ordinary output allowance and safety margin. An **additional 4096 estimated input-token overhead reserve** covers unobserved dynamic injection; it does not replace either ordinary output reservation or the configured auto-compaction reserve. The estimate must fit below the next auto-compaction threshold too. Arbitrarily large future user messages, stateful extension transforms and opaque stream-wrapper injections are **not** completely previewed or guaranteed; callbacks are never run speculatively.
+- A retained raw tail/system/tool schema that cannot fit causes explicit failure, preferably before summary calls. The compactor never moves the kept pointer, drops live results, splits stored messages or changes `keepRecentTokens` to manufacture success. Signal and branch/model/settings identity are checked before native append. Success appends exactly one checkpoint; failure preserves history and installs no partial checkpoint. Existing automatic same-turn failure suppression also covers deterministic size/output failures; new user/model/settings conditions or an explicit successful compact permit retry.
+
+The token estimator is not a provider-exact Japanese tokenizer. Byte bounds and margin prevent gross overload but do not make backend size errors impossible. Actual cache/auth/reasoning defaults are preserved; resource bounds do not imply price neutrality or a contractual currency ceiling. Where tariff metadata is trustworthy, a conservative uncached estimate is `2 × max(input, cacheWrite, cacheRead) + 0.524288 × output` in per-million-token currency units; unknown upstream/subscription tariffs are not zero merely because model metadata says zero. A separately approved provider/cost cap is required for paid live QC. Offline faux streams establish mechanical bounds and native lifecycle, **not semantic fidelity**; live human acceptance remains a separate gate.
 
 ### Cut Point Rules
 

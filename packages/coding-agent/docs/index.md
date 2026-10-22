@@ -84,3 +84,4 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Development
 
 - [Development](development.md) - local setup, project structure, and debugging.
+- [D-COMP-002](D-COMP-002.md) - bounded native compaction design and acceptance checklist.
