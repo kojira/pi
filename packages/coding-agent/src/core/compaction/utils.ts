@@ -4,6 +4,7 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText, type Message } from "@earendil-works/pi-ai";
+import { convertToLlm } from "../messages.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -163,6 +164,7 @@ export interface SummarySource {
 	entryId?: string;
 	blockIndex: number;
 	role: string;
+	customType?: string;
 	text: string;
 	format: "prose" | "code/log";
 	fenceLanguage?: string;
@@ -174,12 +176,18 @@ export interface SummarySource {
 	truncated?: boolean;
 }
 
-/** Opt-in source ledger. The public/branch serializeConversation defaults stay unchanged. */
-export function serializeSummarySources(messages: Message[], firstIndex: number, entryIds?: string[]): SummarySource[] {
+/** Project native sources individually: exclusions must not shift identities, roles or source indices. */
+export function serializeSummarySources(
+	messages: AgentMessage[],
+	firstIndex: number,
+	entryIds?: string[],
+): SummarySource[] {
 	const result: SummarySource[] = [];
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
-		const projectedContent = message.role === "toolResult" ? contentText(message.content, "") : message.content;
+		const projection = convertToLlm([message])[0];
+		if (!projection) continue;
+		const projectedContent = message.role === "toolResult" ? contentText(projection.content, "") : projection.content;
 		const blocks =
 			typeof projectedContent === "string" ? [{ type: "text" as const, text: projectedContent }] : projectedContent;
 		for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
@@ -204,6 +212,7 @@ export function serializeSummarySources(messages: Message[], firstIndex: number,
 				entryId: entryIds?.[i],
 				blockIndex,
 				role: message.role === "assistant" && block.type === "thinking" ? "assistant thinking" : message.role,
+				...(message.role === "custom" ? { customType: message.customType } : {}),
 				text,
 				format: fence || block.type === "toolCall" || message.role === "toolResult" ? "code/log" : "prose",
 				...(fence ? { fenceLanguage: Array.from(fence[1]).slice(0, 80).join("") } : {}),

@@ -908,7 +908,7 @@ export async function compact(
 			chronology: "before current span",
 		});
 	const previousCount = sources.length;
-	for (const source of serializeSummarySources(convertToLlm(messages), previousCount, preparation.sourceEntryIds)) {
+	for (const source of serializeSummarySources(messages, previousCount, preparation.sourceEntryIds)) {
 		sources.push({
 			...source,
 			phase:

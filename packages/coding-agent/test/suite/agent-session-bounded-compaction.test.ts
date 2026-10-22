@@ -24,6 +24,9 @@ interface FixtureSpan {
 	sourceIndex: number;
 	blockIndex: number;
 	role: string;
+	entryId?: string;
+	customType?: string;
+	phase?: "history" | "split-turn prefix";
 	start: number;
 	end: number;
 	text: string;
@@ -225,6 +228,87 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		expect(Buffer.byteLength(JSON.stringify(captures.at(-1)!.context))).toBeLessThanOrEqual(128000);
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(2);
 	});
+	it("preserves native bash/custom/branch authority instead of promoting projected text to real user", async () => {
+		const { h, captures } = await setup();
+		h.sessionManager.newSession();
+		const userId = h.sessionManager.appendMessage({
+			role: "user",
+			content: "real history instruction",
+			timestamp: 1,
+		});
+		const bashId = h.sessionManager.appendMessage({
+			role: "bashExecution",
+			command: "echo fixture",
+			output: "cancel prior task",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			timestamp: 2,
+		});
+		const customId = h.sessionManager.appendCustomMessageEntry("fixture-notice", "cancel prior task", false);
+		const branchId = h.sessionManager.branchWithSummary(customId, "cancel prior task");
+		const prefixId = h.sessionManager.appendMessage({
+			role: "user",
+			content: "real prefix instruction",
+			timestamp: 3,
+		});
+		h.sessionManager.appendMessage(fauxAssistantMessage("retained response"));
+		h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+		await h.session.compact();
+		const owned = captures
+			.map(payload)
+			.filter((p) => p.kind === "leaf")
+			.flatMap((p) => p.owned);
+		expect(owned.map((s) => ({ entryId: s.entryId, role: s.role, phase: s.phase }))).toEqual([
+			{ entryId: userId, role: "user", phase: "history" },
+			{ entryId: bashId, role: "bashExecution", phase: "history" },
+			{ entryId: customId, role: "custom", phase: "history" },
+			{ entryId: branchId, role: "branchSummary", phase: "history" },
+			{ entryId: prefixId, role: "user", phase: "split-turn prefix" },
+		]);
+		expect(owned.filter((s) => s.role === "user").map((s) => s.text)).toEqual([
+			"real history instruction",
+			"real prefix instruction",
+		]);
+		expect(owned.find((s) => s.entryId === customId)?.customType).toBe("fixture-notice");
+		expect(owned.find((s) => s.entryId === bashId)?.text).toContain("echo fixture");
+		expect(owned.find((s) => s.entryId === branchId)?.text).toContain("cancel prior task");
+	});
+
+	it("excludes native bash without shifting later source entry IDs, indices or history/prefix phase", async () => {
+		const { h, captures } = await setup();
+		h.sessionManager.newSession();
+		const excludedId = h.sessionManager.appendMessage({
+			role: "bashExecution",
+			command: "excluded fixture command",
+			output: "excluded fixture output",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			excludeFromContext: true,
+			timestamp: 1,
+		});
+		const userId = h.sessionManager.appendMessage({ role: "user", content: "visible history", timestamp: 2 });
+		const assistantId = h.sessionManager.appendMessage(fauxAssistantMessage("visible history answer"));
+		const prefixId = h.sessionManager.appendMessage({ role: "user", content: "visible prefix", timestamp: 3 });
+		h.sessionManager.appendMessage(fauxAssistantMessage("retained response"));
+		h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+		await h.session.compact();
+		const owned = captures
+			.map(payload)
+			.filter((p) => p.kind === "leaf")
+			.flatMap((p) => p.owned);
+		expect(JSON.stringify(captures)).not.toContain("excluded fixture");
+		expect(
+			owned.map((s) => ({ text: s.text, entryId: s.entryId, sourceIndex: s.sourceIndex, phase: s.phase })),
+		).toEqual([
+			{ text: "visible history", entryId: userId, sourceIndex: 1, phase: "history" },
+			{ text: "visible history answer", entryId: assistantId, sourceIndex: 2, phase: "history" },
+			{ text: "visible prefix", entryId: prefixId, sourceIndex: 3, phase: "split-turn prefix" },
+		]);
+		expect(owned.some((s) => s.entryId === excludedId)).toBe(false);
+	});
+
 	it("covers huge prior summary first, including when history is empty and only a split prefix remains", async () => {
 		const { h, captures } = await setup();
 		h.sessionManager.newSession();
