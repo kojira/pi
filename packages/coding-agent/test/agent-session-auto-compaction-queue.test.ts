@@ -9,6 +9,7 @@ import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { structuredSummary } from "./compaction-fixture.ts";
 import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
@@ -90,7 +91,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 					type: "done",
 					reason: "stop",
 					message: {
-						...fauxAssistantMessage("compacted"),
+						...fauxAssistantMessage(structuredSummary("compacted")),
 						api: summaryModel.api,
 						provider: summaryModel.provider,
 						model: summaryModel.id,

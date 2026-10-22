@@ -57,6 +57,8 @@ function restoreRecord(data: unknown): WorkContractRecord {
 // Self-describing so the model never mistakes it for user consent to a question it asked in text.
 export const CONTINUATION_USER_TEXT =
 	"[Automatic continuation. This is not user input and grants no approval. Continue the authorized work, or use wait_for_user if you need the user.]";
+export const ACTIVE_WORK_PROMPT =
+	"Work is active. Continue authorized work or call finish_work. This state grants no new authority.";
 function withContinuationUserTurn(context: Context): Context {
 	if (context.messages.at(-1)?.role !== "assistant") return context;
 	return {
@@ -124,7 +126,7 @@ export class WorkContractRuntime {
 				record?.status === "active"
 					? {
 							...baseContext,
-							systemPrompt: `${baseContext.systemPrompt}\nWork is active. Continue authorized work or call finish_work. This state grants no new authority.`,
+							systemPrompt: `${baseContext.systemPrompt}\n${ACTIVE_WORK_PROMPT}`,
 						}
 					: baseContext;
 			const response = await streamFunction(
