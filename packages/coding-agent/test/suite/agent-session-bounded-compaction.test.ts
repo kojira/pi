@@ -16,7 +16,7 @@ import { createHarness, type Harness } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
 
 const checkpoint =
-	"## Goal\nContinue approved task.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\n- Confirmed fixture.\n### In Progress\n- Continue.\n### Blocked\n- None.\n## Key Decisions\n- Keep source order.\n## Next Steps\n1. Continue.\n## Critical Context\n- Fixture references.\n## Updates & Sources\n- Preserve uncertainty; source 0 before current span.";
+	"## Goal\nContinue approved task.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\n- Confirmed fixture.\n### In Progress\n- Continue.\n### Blocked\n- None.\n## Key Decisions\n- Keep source order.\n## Next Steps\n1. Continue.\n## Critical Context\n- Fixture references.";
 
 type Capture = { context: Context; options: SimpleStreamOptions | undefined };
 
@@ -56,10 +56,10 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		for (const h of harnesses.splice(0)) h.cleanup();
 	});
 
-	async function setup(text = "old history"): Promise<{ h: Harness; captures: Capture[] }> {
+	async function setup(text = "old history", contextWindow = 200000): Promise<{ h: Harness; captures: Capture[] }> {
 		const h = await createHarness({
 			persistent: true,
-			models: [{ id: "bounded", contextWindow: 200000, maxTokens: 32000 }],
+			models: [{ id: "bounded", contextWindow, maxTokens: 32000 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 }, retry: { enabled: false } },
 		});
 		harnesses.push(h);
@@ -88,6 +88,111 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
 	}
 
+	it.each([1000000, 200000])("uses the model window, not a fixed small cap (%i)", async (window) => {
+		const { h, captures } = await setup("日本語 data\n".repeat(93334), window);
+		await h.session.compact();
+		const requests = captures.map(payload);
+		const leaves = requests.filter((p) => p.kind === "leaf");
+		const merges = requests.filter((p) => p.kind === "merge");
+		expect(
+			leaves
+				.flatMap((p) => p.owned)
+				.map((s) => s.text)
+				.join(""),
+		).toBe("日本語 data\n".repeat(93334));
+		if (window === 1000000) expect(captures).toHaveLength(1);
+		else {
+			expect(leaves.length).toBeGreaterThan(1);
+			expect(leaves.length).toBeLessThanOrEqual(5);
+			expect(merges).toHaveLength(1);
+			if (merges[0].kind === "merge") expect(merges[0].children).toHaveLength(leaves.length);
+		}
+		let totalInput = 0;
+		for (const { context, options } of captures) {
+			const json = JSON.stringify(context);
+			const ascii = json.replace(/[^\x00-\x7f]/gu, "");
+			const planned = Math.ceil(ascii.length / 3 + Buffer.byteLength(json.replace(/[\x00-\x7f]/gu, "")) / 2);
+			totalInput += planned;
+			expect(planned + options!.maxTokens! + Math.max(4096, window * 0.05)).toBeLessThanOrEqual(window);
+		}
+		expect(totalInput).toBeLessThanOrEqual(2000000);
+		expect(captures.reduce((n, c) => n + c.options!.maxTokens!, 0)).toBe(window === 1000000 ? 13107 : 65535);
+	});
+
+	it("accepts a complete meaningful summary beyond the obsolete 16KB checkpoint cap", async () => {
+		const { h } = await setup();
+		const complete = checkpoint.replace("- Fixture references.", `- ${"relevant context ".repeat(1500)}`);
+		h.setResponses([fauxAssistantMessage(complete)]);
+		const result = await h.session.compact();
+		expect(result.summary).toBe(complete);
+		h.setResponses([
+			(context, options) => {
+				expect(clampMaxTokensToContext(h.getModel(), context, options?.maxTokens ?? 32000)).toBe(32000);
+				return workResponse("continued", context);
+			},
+		]);
+		await h.session.prompt("continue");
+		h.setResponses([fauxAssistantMessage(checkpoint)]);
+		await h.session.compact();
+	});
+
+	it("fails closed in real prompt after required summary failure, including suppression", async () => {
+		const { h } = await setup();
+		const last = h.session.agent.state.messages.at(-1)!;
+		if (last.role !== "assistant") throw new Error("fixture assistant missing");
+		last.usage = { ...last.usage, input: 190000, totalTokens: 190000 };
+		const prefix = readFileSync(h.session.sessionFile!, "utf8");
+		const leaf = h.sessionManager.getLeafId();
+		let ordinary = 0;
+		h.setResponses([
+			fauxAssistantMessage(checkpoint, { stopReason: "length" }),
+			() => {
+				ordinary++;
+				return fauxAssistantMessage("must not submit");
+			},
+		]);
+		await expect(h.session.prompt("unsubmitted user intent")).rejects.toThrow(/compaction|History preserved/i);
+		await expect(h.session.prompt("unsubmitted user intent")).rejects.toThrow(/compaction|History preserved/i);
+		expect(ordinary).toBe(0);
+		expect(h.faux.state.callCount).toBe(1);
+		unchanged(h, prefix, leaf);
+		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
+		// A historical failure is not a blanket latch on a safe, smaller context.
+		last.usage = { ...last.usage, input: 100, totalTokens: 100 };
+		h.setResponses([(context) => workResponse("safe reply", context)]);
+		await h.session.prompt("small legitimate context");
+		expect(h.session.getLastAssistantText()).toBe("safe reply");
+	});
+
+	it("fails closed at the real next assistant continuation after required summary failure", async () => {
+		const { h } = await setup("a".repeat(600000));
+		h.session.agent.state.tools = [
+			{
+				name: "grow",
+				label: "Grow",
+				description: "Fixture",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text", text: "r".repeat(160000) }], details: {} }),
+			},
+		];
+		let ordinary = 0;
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("grow", {}), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage(checkpoint, { stopReason: "length" }),
+			(context) => {
+				ordinary++;
+				return workResponse("must not continue", context);
+			},
+		]);
+		await h.session.prompt("grow context").catch(() => {});
+		expect(h.faux.state.callCount).toBe(2);
+		expect(ordinary).toBe(0);
+		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
+		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
+	});
+
 	it.each([
 		"日本語".repeat(170000),
 		"a".repeat(500000),
@@ -99,13 +204,17 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		const preparation = prepareCompaction(h.sessionManager.getBranch(), h.settingsManager.getCompactionSettings())!;
 		const result = await h.session.compact();
 		for (const { context, options } of captures) {
-			expect(Buffer.byteLength(JSON.stringify(context))).toBeLessThanOrEqual(128000);
-			expect(estimateContextTokens(context).tokens).toBeLessThanOrEqual(48000);
-			expect(options?.maxTokens).toBe(8192);
-			expect(clampMaxTokensToContext(h.getModel(), context, options!.maxTokens!)).toBe(8192);
+			// Amendment: constructed input follows the registered window, not fixed 48k/128KB.
+			const json = JSON.stringify(context);
+			const planned = Math.ceil(
+				json.replace(/[^\x00-\x7f]/gu, "").length / 3 + Buffer.byteLength(json.replace(/[\x00-\x7f]/gu, "")) / 2,
+			);
+			expect(planned + options!.maxTokens! + 10000).toBeLessThanOrEqual(200000);
+			expect(options?.maxTokens).toBe(13107);
+			expect(clampMaxTokensToContext(h.getModel(), context, options!.maxTokens!)).toBe(13107);
 			expect(options?.maxRetries).toBe(0);
 		}
-		expect(captures.length).toBeGreaterThan(1);
+		expect(captures.length).toBeGreaterThanOrEqual(1);
 		const leafPayloads = captures.map(payload).filter((p) => p.kind === "leaf");
 		const owned = leafPayloads.flatMap((p) => p.owned).filter((p) => p.sourceIndex === 0);
 		expect(owned.map((p) => p.text).join("")).toBe(text);
@@ -131,15 +240,15 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		const { h, captures } = await setup("z".repeat(1000000));
 		await h.session.compact();
 		for (const { context, options } of captures) {
-			expect(clampMaxTokensToContext(h.getModel(), context, 8192)).toBe(8192);
-			expect(options?.maxTokens).toBe(8192);
+			expect(clampMaxTokensToContext(h.getModel(), context, 13107)).toBe(13107);
+			expect(options?.maxTokens).toBe(13107);
 		}
 	});
 
 	it.each([
 		"",
 		"not structured",
-		checkpoint + "x".repeat(17000),
+		checkpoint + "x".repeat(40000),
 		checkpoint.replace("### Done\n- Confirmed fixture.", "### Done"),
 		checkpoint.replace("### Done", "### Outside"),
 	])("rejects unusable stop output without mutating the file (%#)", async (bad) => {
@@ -195,7 +304,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 	});
 
 	it("preplans the leaf limit before any request", async () => {
-		const { h, captures } = await setup("あ".repeat(1500000));
+		const { h, captures } = await setup("あ".repeat(1500000), 50000);
 		const prefix = readFileSync(h.session.sessionFile!, "utf8");
 		const leaf = h.sessionManager.getLeafId();
 		await expect(h.session.compact()).rejects.toThrow(/32|leaf|leaves/);
@@ -432,7 +541,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		expect(JSON.stringify(spans)).toContain("second-call");
 	});
 
-	it("reduces adjacent chronological children with override provenance, never all-leaf concatenation", async () => {
+	it("reduces largest-fitting adjacent children with override provenance and no transcript reinjection", async () => {
 		const { h, captures } = await setup(`First user goal: build A.\n${"日本語".repeat(80000)}`);
 		h.sessionManager.appendMessage({
 			role: "user",
@@ -444,7 +553,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		await h.session.compact();
 		const requests = captures.map(payload);
 		for (const p of requests.filter((p) => p.kind === "merge")) {
-			expect(p.children).toHaveLength(2);
+			expect(p.children.length).toBeGreaterThanOrEqual(2);
 			expect(p.children[0].last.sourceIndex).toBeLessThanOrEqual(p.children[1].first.sourceIndex);
 			if (p.children[0].last.sourceIndex === p.children[1].first.sourceIndex)
 				expect(p.children[0].last.offset).toBe(p.children[1].first.offset);
@@ -476,7 +585,11 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 
 	it("bounds physical retries across the job, even if settings allow more", async () => {
 		const { h } = await setup();
-		h.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 100, baseDelayMs: 0 } });
+		// Keep output allowance 8192 to isolate the unchanged 64-physical-attempt ceiling.
+		h.settingsManager.applyOverrides({
+			compaction: { reserveTokens: 10240 },
+			retry: { enabled: true, maxRetries: 100, baseDelayMs: 0 },
+		});
 		h.setResponses(
 			Array.from({ length: 100 }, () =>
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limit" }),
@@ -490,13 +603,16 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 	});
 
 	it("reserves cumulative estimated input before retrying", async () => {
-		const { h } = await setup("a".repeat(125000));
+		const { h } = await setup("a".repeat(200000));
 		h.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 100, baseDelayMs: 0 } });
 		let spent = 0;
 		let lastInput = 0;
 		h.setResponses(
 			Array.from({ length: 100 }, () => (context: Context) => {
-				lastInput = Math.max(estimateContextTokens(context).tokens, Math.ceil(JSON.stringify(context).length / 4));
+				const json = JSON.stringify(context);
+				lastInput = Math.ceil(
+					json.replace(/[^\x00-\x7f]/gu, "").length / 3 + Buffer.byteLength(json.replace(/[\x00-\x7f]/gu, "")) / 2,
+				);
 				spent += lastInput;
 				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" });
 			}),
@@ -580,15 +696,16 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			expect(h.eventsOfType("agent_settled")).toHaveLength(1);
 		},
 	);
-	it("allows 32 leaves and 31 adjacent merges with maximum depth 5", async () => {
-		const { h, captures } = await setup("あ".repeat(1300000));
-		await h.session.compact();
-		const requests = captures.map(payload);
-		expect(requests.filter((p) => p.kind === "leaf")).toHaveLength(32);
-		expect(requests.filter((p) => p.kind === "merge")).toHaveLength(31);
-		const last = requests.at(-1)!;
-		if (last.kind !== "merge") throw new Error("missing root merge");
-		expect(Math.max(...last.children.map((c) => c.depth)) + 1).toBe(5);
+	it("preflights an otherwise legal multi-leaf plan against the whole-job deadline", async () => {
+		// Amendment replaces mandatory 32-leaf/31-merge success: even legal
+		// envelopes must leave a practical serial request allowance in eight minutes.
+		const { h, captures } = await setup("a".repeat(4000000), 50000);
+		h.settingsManager.applyOverrides({ compaction: { reserveTokens: 2048 } });
+		const prefix = readFileSync(h.session.sessionFile!, "utf8");
+		const leaf = h.sessionManager.getLeafId();
+		await expect(h.session.compact()).rejects.toThrow(/planned .*calls.*deadline/);
+		expect(captures).toHaveLength(0);
+		unchanged(h, prefix, leaf);
 	});
 
 	it.each(["fixed instructions", "output allowance", "system prompt", "tool schema", "unknown reasoning adapter"])(
@@ -629,7 +746,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		let calls = 0;
 		h.session.agent.streamFunction = (model, _context, options) => {
 			calls++;
-			expect(options?.maxTokens).toBe(8192);
+			expect(options?.maxTokens).toBe(13107);
 			expect(options?.reasoning).toBe("high");
 			expect(options?.maxRetries).toBe(0);
 			const stream = createAssistantMessageEventStream();
@@ -646,8 +763,8 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			return stream;
 		};
 		await expect(h.session.compact()).rejects.toThrow(/budget exhausted/);
-		// Wire answer+thinking cap = 8192+16384; 22nd physical attempt exceeds 524288 reserved tokens.
-		expect(calls).toBe(21);
+		// Native reserve-derived answer+thinking cap = 13107+16384.
+		expect(calls).toBe(Math.floor(524288 / (13107 + 16384)));
 	});
 
 	it.each(["model", "history", "system"])(

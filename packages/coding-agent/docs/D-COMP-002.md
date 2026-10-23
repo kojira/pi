@@ -158,3 +158,29 @@ actual token usage. A reconstructed 41-call plan is not a measured sent-call cou
 
 Independent reviewer acceptance and exact-head CI remain required. No merge,
 deployment, runtime writes, paid probes, dependency or catalog updates authorized.
+
+
+Corrective implementation evidence: the frozen amendment preceded code. Five
+focused assertion-level RED failures covered 25 actual faux requests versus one
+for the generic 1.4MB/1M-window fixture, 13 leaves versus at most five for its
+200k-window counterpart, the obsolete final output cap, initial prompt fail-open,
+and continuation fail-open. Subsequent native bounded/compatibility suites pass
+89 tests, including preserved source-role/entry-ID regressions. Obsolete fixed
+cap and mandatory binary-fan-in assertions now check model-derived envelopes,
+concise six-section output and largest-fitting chronological reduction instead.
+The unchanged 64-attempt ceiling is isolated with a smaller configured reserve;
+the input/reasoning-output ceilings retain dedicated exhaustion assertions.
+The former mandatory 32-leaf/31-merge success fixture is replaced with deadline
+preflight rejection: legal per-request sizes alone do not justify a serial plan
+that cannot fit its planning allowance. No live fidelity or latency is claimed.
+
+Resource witness (generic 1,400,010-byte Japanese/ASCII fixture, native temporary
+session, no provider network): C=1M uses one leaf, zero merges, 669,793 cumulative
+estimated input tokens and 13,107 reserved output tokens. C=200k uses four leaves
+and one all-child merge, 676,651 cumulative estimated input and 65,535 reserved
+output tokens. Every constructed request fits its model-derived envelope.
+These are offline planned resources, not measured historical sent counts/costs.
+Final local check and isolated full suite pass (coding-agent: 2341 passed,
+2 expected failures, 50 skipped); exact-head CI and independent review are
+separate required gates. The first full run exposed only an obsolete fixed8192
+assertion, updated to the approved reserve/model-derived allowance and rechecked.

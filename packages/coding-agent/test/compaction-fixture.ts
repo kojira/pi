@@ -16,7 +16,5 @@ ${goal}
 ## Next Steps
 1. Continue approved work.
 ## Critical Context
-- Fixture references.
-## Updates & Sources
-- Source 0 precedes current span; preserve uncertainty.`;
+- Fixture references; preserve uncertainty.`;
 }

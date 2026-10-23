@@ -801,7 +801,7 @@ export function prepareCompaction(
 			else if (marker >= 0) {
 				const body = previousSummary.slice(0, marker);
 				// Preview includes its selection order, so validate only with the persisted native details.
-				if (recognizedFilePreview(previousSummary.slice(marker), details, body)) previousSummary = body;
+				if (recognizedFilePreview(previousSummary.slice(marker), details)) previousSummary = body;
 			}
 		}
 		const firstKeptEntryIndex = pathEntries.findIndex((entry) => entry.id === prevCompaction.firstKeptEntryId);
@@ -932,8 +932,8 @@ export async function compact(
 		sessionId,
 	});
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
-	const summary = result.text + boundedFilePreview(readFiles, modifiedFiles, messages, result.text);
-	validateFinalSummary(summary);
+	const summary = result.text + boundedFilePreview(readFiles, modifiedFiles, messages);
+	validateFinalSummary(summary, Math.min(Math.floor(preparation.settings.reserveTokens * 0.8), model.maxTokens));
 	if (!preparation.firstKeptEntryId) throw new BoundedCompactionError("first kept entry has no UUID");
 	return {
 		summary,
@@ -955,12 +955,7 @@ function isCompactionDetails(value: unknown): value is CompactionDetails {
 }
 
 /** Full lists stay in existing details. Preview order is last-reference-first, modified wins ties. */
-function boundedFilePreview(
-	readFiles: string[],
-	modifiedFiles: string[],
-	messages: AgentMessage[],
-	body: string,
-): string {
+function boundedFilePreview(readFiles: string[], modifiedFiles: string[], messages: AgentMessage[]): string {
 	if (!readFiles.length && !modifiedFiles.length) return "";
 	const recency = new Map<string, number>();
 	messages.forEach((m, index) => {
@@ -989,22 +984,14 @@ function boundedFilePreview(
 	for (const candidate of candidates) {
 		selected.push(candidate);
 		const preview = render();
-		if (
-			Math.ceil(preview.length / 4) > 2048 ||
-			Buffer.byteLength(preview) > 8192 ||
-			Math.ceil((body.length + preview.length) / 4) > 4096 ||
-			Buffer.byteLength(body + preview) > 16384
-		)
-			selected.pop();
+		if (Math.ceil(preview.length / 4) > 2048 || Buffer.byteLength(preview) > 8192) selected.pop();
 	}
 	const preview = render();
-	if (Buffer.byteLength(body + preview) > 16384 || Math.ceil((body.length + preview.length) / 4) > 4096)
-		throw new BoundedCompactionError("final metadata notice cannot fit");
 	return preview;
 }
 
 /** Only a native entry with matching details and an exact terminal formatter suffix is eligible. */
-function recognizedFilePreview(suffix: string, details: CompactionDetails, body: string): boolean {
+function recognizedFilePreview(suffix: string, details: CompactionDetails): boolean {
 	try {
 		const line = suffix.split("\n")[3];
 		const parsed: unknown = JSON.parse(line);
@@ -1047,15 +1034,13 @@ function recognizedFilePreview(suffix: string, details: CompactionDetails, body:
 					},
 				};
 			});
-		return suffix === boundedFilePreview(details.readFiles, details.modifiedFiles, messages, body);
+		return suffix === boundedFilePreview(details.readFiles, details.modifiedFiles, messages);
 	} catch {
 		return false;
 	}
 }
 
-function validateFinalSummary(summary: string): void {
+function validateFinalSummary(summary: string, outputCap: number): void {
 	const marker = summary.lastIndexOf("\n\n<file-preview>");
-	validateBoundedSummary(marker < 0 ? summary : summary.slice(0, marker));
-	if (Buffer.byteLength(summary) > 16384 || Math.ceil(summary.length / 4) > 4096)
-		throw new BoundedCompactionError("final checkpoint exceeds output budget");
+	validateBoundedSummary(marker < 0 ? summary : summary.slice(0, marker), outputCap);
 }
