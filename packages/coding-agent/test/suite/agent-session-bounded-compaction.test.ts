@@ -164,6 +164,32 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		expect(h.session.getLastAssistantText()).toBe("safe reply");
 	});
 
+	it("continues a small tool turn when the catalog output maximum equals the context window", async () => {
+		const h = await createHarness({
+			models: [{ id: "context-sized-output", contextWindow: 128000, maxTokens: 128000 }],
+			settings: { retry: { enabled: false } },
+			tools: [
+				{
+					name: "inspect",
+					label: "Inspect",
+					description: "Read a small fixture",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "small result" }], details: {} }),
+				},
+			],
+		});
+		harnesses.push(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("inspect", {}), { stopReason: "toolUse" }),
+			(context) => workResponse("continued small turn", context),
+		]);
+		await h.session.prompt("inspect the fixture");
+		expect(h.session.getLastAssistantText()).toBe("continued small turn");
+		expect(h.faux.state.callCount).toBe(2);
+		expect(h.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
+	});
+
 	it("fails closed at the real next assistant continuation after required summary failure", async () => {
 		const { h } = await setup("a".repeat(600000));
 		h.session.agent.state.tools = [

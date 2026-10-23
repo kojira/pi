@@ -27,6 +27,7 @@ import type {
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -662,7 +663,8 @@ export class AgentSession {
 		// Use native context accounting, with stale pre-checkpoint usage excluded.
 		// This gate is not a speculative preview of extension request transforms.
 		const input = estimateRequestTokens(llmMessages).tokens;
-		return shouldCompact(input, model.contextWindow, settings) || input + model.maxTokens >= model.contextWindow;
+		const output = clampMaxTokensToContext(model, { messages: llmMessages }, model.maxTokens);
+		return shouldCompact(input, model.contextWindow, settings) || input + output >= model.contextWindow;
 	}
 
 	/** A failed/suppressed required compact is not permission to submit unchanged input. */
@@ -2201,8 +2203,14 @@ export class AgentSession {
 		const input =
 			Math.max(estimateRequestTokens(context).tokens, Math.ceil(JSON.stringify(context).length / 4)) + 4096;
 		const slack = Math.max(4096, Math.ceil(model.contextWindow * 0.05));
+		// A catalog output maximum is not a mandatory reservation. Clamp the
+		// intended allowance to the measured native budget, retaining its slack.
+		const output = Math.min(
+			clampMaxTokensToContext(model, context, model.maxTokens),
+			Math.max(1, model.contextWindow - input - slack),
+		);
 		if (
-			input + model.maxTokens + slack >= model.contextWindow ||
+			input + output + slack > model.contextWindow ||
 			input >= model.contextWindow - preparation.settings.reserveTokens
 		) {
 			throw new BoundedCompactionError(
