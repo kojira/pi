@@ -118,3 +118,69 @@ The default generation seam is now `AgentSession.compact/_runAutoCompaction -> c
 Independent review of the initial implementation blocked source acceptance on a C2 provenance defect: converting the whole native span before building its ledger promoted bash/custom/branch sources to user roles and shifted entry IDs/history-prefix phases after excluded bash. The correction projects each native source individually, retains its original role/custom type and native index, and applies existing exclusions without shifting identity. Shared ordinary/branch conversion and persisted schemas remain unchanged. Two real native request-capture regressions first failed at the payload assertions, then passed; the focused native/standalone summary suites pass 68 tests (53 native), and the root check passes. Fresh exact-head CI and independent rechallenge are required for the corrected commit.
 
 Independent review and exact-head CI are required before source acceptance; the original block is not treated as reviewer acceptance. Separately authorized live semantic/human QC, provider-exact tokenization, arbitrary future dynamic injection, opaque upstream tariffs and retained-tail-impossible recovery remain outside offline proof. Exact private logs are retained outside the repository; no raw private evidence is published.
+
+## Model-aware corrective amendment (source/PR/offline only)
+
+This amendment supersedes C2's mandatory output ledger and C3's fixed input/output
+ceilings and binary-only reduction, not source identity or history preservation.
+The observed generation-length stop does not establish which node failed or its
+actual token usage. A reconstructed 41-call plan is not a measured sent-call count.
+
+- Derive answer allowance from the existing native summary reserve policy:
+  `O=min(floor(0.8*reserveTokens), model.maxTokens)`; preserve reasoning expansion.
+  Input envelope is `C-wireOutput-max(4096,ceil(0.05*C))`. Measure the constructed
+  system/prompt/JSON, with ASCII/3 and non-ASCII UTF-8/2 uncertainty estimate,
+  never bytes/4 as proof of Japanese accuracy. This is conservative planning,
+  not provider-exact tokenization. No arbitrary small input byte/token ceiling.
+- Prefer one whole request. Otherwise retain structural units, Unicode-safe
+  fragments and bounded preceding overlap. Reduce the largest fitting adjacent
+  group, including all children when legal; never merge an already single root.
+  Preflight worst-case merge envelopes and planned calls against the eight-minute
+  deadline using a 15-second minimum planning allowance per serial request.
+  Keep existing attempt, cumulative input/output, leaf/depth and deadline ceilings.
+- Request six concise sections, target half O, retain only actionable references
+  and meaningful supersessions, not exhaustive per-source updates/inventories.
+  Input provenance remains unchanged. Reject length/partial/malformed outputs.
+  Body allowance derives from O; bounded file preview remains separate. Native
+  hypothetical rebuild, not a fixed 4096-token/16KB final cap, decides next-turn fit.
+- Required automatic compaction failure/suppression must stop unsafe initial
+  `session.prompt` and assistant continuation. Throw a native caller error before
+  ordinary submission when unsafe remains; preserve stored history and caller's
+  unsubmitted intent, no synthetic replay/queue mutation or second overflow job.
+  A prior failure alone must not block currently safe small context.
+
+| Seam | Assertion RED -> minimal GREEN | Retained evidence / prohibited shortcut |
+| --- | --- | --- |
+| Native default generation | 1.4MB generic history, C=1M: exactly one summary call; smaller C: largest legal leaves and one all-child merge when it fits | Capture actual contexts/options and total estimated input/reserved output; no live calls or provider switch |
+| Native final checkpoint/rebuild | Complete moderately long six-section output accepted when rebuild fits; next ordinary output positive and next compact legal | No truncation, pointer change or partial adoption; retain provenance regressions |
+| Real session.prompt | Required summary length-stop: zero ordinary calls, no append, identical history prefix, rejected caller intent; suppressed retry also zero calls | No threshold->ordinary400->second paid job, no queue deletion/replay |
+| Actual tool continuation | Required summary failure stops the next assistant request; safe smaller context with historical failure still works | Native lifecycle assertions, no preview API or arbitrary future extension guarantees |
+
+Independent reviewer acceptance and exact-head CI remain required. No merge,
+deployment, runtime writes, paid probes, dependency or catalog updates authorized.
+
+
+Corrective implementation evidence: the frozen amendment preceded code. Five
+focused assertion-level RED failures covered 25 actual faux requests versus one
+for the generic 1.4MB/1M-window fixture, 13 leaves versus at most five for its
+200k-window counterpart, the obsolete final output cap, initial prompt fail-open,
+and continuation fail-open. Subsequent native bounded/compatibility suites pass
+89 tests, including preserved source-role/entry-ID regressions. Obsolete fixed
+cap and mandatory binary-fan-in assertions now check model-derived envelopes,
+concise six-section output and largest-fitting chronological reduction instead.
+The unchanged 64-attempt ceiling is isolated with a smaller configured reserve;
+the input/reasoning-output ceilings retain dedicated exhaustion assertions.
+The former mandatory 32-leaf/31-merge success fixture is replaced with deadline
+preflight rejection: legal per-request sizes alone do not justify a serial plan
+that cannot fit its planning allowance. No live fidelity or latency is claimed.
+
+Resource witness (generic 1,400,010-byte Japanese/ASCII fixture, native temporary
+session, no provider network): C=1M uses one leaf, zero merges, 669,793 cumulative
+estimated input tokens and 13,107 reserved output tokens. C=200k uses four leaves
+and one all-child merge, 676,651 cumulative estimated input and 65,535 reserved
+output tokens. Every constructed request fits its model-derived envelope.
+These are offline planned resources, not measured historical sent counts/costs.
+Final local check and isolated full suite pass (coding-agent: 2341 passed,
+2 expected failures, 50 skipped); exact-head CI and independent review are
+separate required gates. The first full run exposed only an obsolete fixed8192
+assertion, updated to the approved reserve/model-derived allowance and rechecked.

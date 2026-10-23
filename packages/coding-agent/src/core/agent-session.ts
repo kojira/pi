@@ -27,6 +27,7 @@ import type {
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -365,6 +366,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionGeneration = 0;
+	private _autoCompactionFailureGeneration = 0;
 	/** A truncated threshold summary is not retried after every tool in the same user turn. */
 	private _failedThresholdSummaryKey: string | undefined;
 	private _continuationCancellationGeneration = 0;
@@ -615,23 +617,20 @@ export class AgentSession {
 		runSignal?: AbortSignal,
 	): Promise<AgentContext> {
 		const model = this.model;
-		const settings = this.settingsManager.getCompactionSettings();
 
-		if (
-			!model ||
-			model.contextWindow <= 0 ||
-			!shouldCompact(estimateContextTokens(context.messages).tokens, model.contextWindow, settings)
-		) {
+		if (!model || model.contextWindow <= 0 || !this._requiresCompaction(context.messages)) {
 			return context;
 		}
 
 		const summaryKey = this._thresholdSummaryKey();
-		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) return context;
+		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey)
+			throw new BoundedCompactionError("required compaction previously failed; context remains unsafe");
 
 		const compactionGeneration = this._autoCompactionGeneration;
 		const cancellationGeneration = this._continuationCancellationGeneration;
 		const toolResultBoundary = context.messages.at(-1)?.role === "toolResult";
 		await this._runAutoCompaction("threshold", false);
+		if (this._autoCompactionGeneration === compactionGeneration) this._assertRequiredCompactionReady();
 		if (
 			toolResultBoundary &&
 			this._autoCompactionGeneration > compactionGeneration &&
@@ -645,6 +644,35 @@ export class AgentSession {
 			...context,
 			messages: this.agent.state.messages.slice(),
 		};
+	}
+
+	private _requiresCompaction(messages: AgentMessage[]): boolean {
+		const model = this.model;
+		const settings = this.settingsManager.getCompactionSettings();
+		if (!model || !settings.enabled) return false;
+		const boundary = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const boundaryTime = boundary ? new Date(boundary.timestamp).getTime() : -Infinity;
+		const llmMessages = convertToLlm(messages).map((message) =>
+			message.role === "assistant" && message.timestamp <= boundaryTime
+				? {
+						...message,
+						usage: { ...message.usage, totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					}
+				: message,
+		);
+		// Use native context accounting, with stale pre-checkpoint usage excluded.
+		// This gate is not a speculative preview of extension request transforms.
+		const input = estimateRequestTokens(llmMessages).tokens;
+		const output = clampMaxTokensToContext(model, { messages: llmMessages }, model.maxTokens);
+		return shouldCompact(input, model.contextWindow, settings) || input + output >= model.contextWindow;
+	}
+
+	/** A failed/suppressed required compact is not permission to submit unchanged input. */
+	private _assertRequiredCompactionReady(): void {
+		if (this._requiresCompaction(this.agent.state.messages))
+			throw new BoundedCompactionError(
+				"required compaction did not make context safe; ordinary request not submitted",
+			);
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1386,7 +1414,14 @@ export class AgentSession {
 			// The user's new prompt is sent below, so do not call agent.continue() here.
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant) {
+				const failureGeneration = this._autoCompactionFailureGeneration;
 				await this._checkCompaction(lastAssistant, false);
+				if (
+					this._autoCompactionFailureGeneration > failureGeneration ||
+					(this._failedThresholdSummaryKey !== undefined &&
+						this._failedThresholdSummaryKey === this._thresholdSummaryKey())
+				)
+					this._assertRequiredCompactionReady();
 			}
 
 			// Build messages array (custom message if any, then user message)
@@ -2168,8 +2203,14 @@ export class AgentSession {
 		const input =
 			Math.max(estimateRequestTokens(context).tokens, Math.ceil(JSON.stringify(context).length / 4)) + 4096;
 		const slack = Math.max(4096, Math.ceil(model.contextWindow * 0.05));
+		// A catalog output maximum is not a mandatory reservation. Clamp the
+		// intended allowance to the measured native budget, retaining its slack.
+		const output = Math.min(
+			clampMaxTokensToContext(model, context, model.maxTokens),
+			Math.max(1, model.contextWindow - input - slack),
+		);
 		if (
-			input + model.maxTokens + slack >= model.contextWindow ||
+			input + output + slack > model.contextWindow ||
 			input >= model.contextWindow - preparation.settings.reserveTokens
 		) {
 			throw new BoundedCompactionError(
@@ -2574,6 +2615,7 @@ export class AgentSession {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
+					this._autoCompactionFailureGeneration++;
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -2630,6 +2672,7 @@ export class AgentSession {
 			}
 
 			if (this._autoCompactionAbortController.signal.aborted) {
+				this._autoCompactionFailureGeneration++;
 				this._emit({
 					type: "compaction_end",
 					reason,
@@ -2697,6 +2740,7 @@ export class AgentSession {
 			// Continue once so queued messages are delivered.
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
+			this._autoCompactionFailureGeneration++;
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
 				this._autoCompactionAbortController?.signal.aborted === true ||

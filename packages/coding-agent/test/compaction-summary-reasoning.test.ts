@@ -310,7 +310,7 @@ describe("generateSummary reasoning options", () => {
 		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("refusalFallbacks");
 	});
 
-	it("caps a fitting combined history/prefix request at 8192", async () => {
+	it("derives a fitting combined history/prefix allowance from reserve and model, not a fixed cap", async () => {
 		completeSimpleMock.mockResolvedValue({
 			...mockSummaryResponse,
 			content: [{ type: "text", text: structuredSummary() }],
@@ -334,6 +334,7 @@ describe("generateSummary reasoning options", () => {
 			totalTokens: 20,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		});
-		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([8192]);
+		// Corrective amendment restores the existing 0.8-reserve policy, limited by model output.
+		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000]);
 	});
 });
