@@ -42,7 +42,7 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 
 1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`) is reached
 2. **Extract messages**: Collect messages from the previous kept boundary (or session start) up to the cut point
-3. **Generate summary**: Bound the fully constructed summary request, including previous summary, instructions and wrappers. Use one request if it fits; otherwise split the summary-only text into chronological structural leaves and reduce the largest fitting adjacent groups serially. Validate every output before using it.
+3. **Generate summary**: Bound the fully constructed summary request, including previous summary, instructions and wrappers, to at most 80% of the model's registered context window. A content-aware estimate charges ASCII about 2.5 characters per token and kana/han/Hangul/fullwidth 1.5 tokens per character, so Japanese-heavy or JSON-dense history is not underestimated; the unused fifth of the window absorbs tokenizer drift and request overhead. Use one request if it fits; otherwise split the summary-only text into chronological structural leaves and reduce the largest fitting adjacent groups serially. Validate every output before using it.
 4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
 5. **Rebuilds context**: Session rebuilds the context for the next request, using summary + messages from `firstKeptEntryId` onwards
 

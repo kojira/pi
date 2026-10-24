@@ -26,6 +26,14 @@ const MAX_JOB_INPUT = 2000000;
 const MAX_JOB_OUTPUT = 524288;
 const DEADLINE_MS = 8 * 60 * 1000;
 const PLANNED_REQUEST_MS = 15000;
+/** Leave a fifth of the registered window unused so estimator error, system/tool overhead and
+ * wrapper/injection variance cannot push a constructed request past the real provider limit. */
+const FILL_RATIO = 0.8;
+/** Planning density for ASCII source. English prose is about four characters per token, but a
+ * serialized summary envelope is JSON: quotes, braces, digits, UUIDs and paths measured near two. */
+const ASCII_CHARS_PER_TOKEN = 2.5;
+/** Kana, han, Hangul and fullwidth forms tokenize near or above one token per character. */
+const CJK_TOKENS_PER_CHAR = 1.5;
 
 export class BoundedCompactionError extends Error {
 	constructor(reason: string) {
@@ -81,14 +89,40 @@ export interface BoundedSummaryOptions {
 	sessionId?: string;
 }
 
+function nonAsciiTokens(codePoint: number): number {
+	// Emoji and other supplementary-plane code points never tokenize below two units.
+	if (codePoint > 0xffff) return 2;
+	if (
+		(codePoint >= 0x3000 && codePoint <= 0x9fff) || // CJK punctuation, kana, han, extension A
+		(codePoint >= 0xac00 && codePoint <= 0xd7a3) || // Hangul syllables
+		(codePoint >= 0xf900 && codePoint <= 0xfaff) || // CJK compatibility ideographs
+		(codePoint >= 0xff01 && codePoint <= 0xff60) || // fullwidth forms
+		(codePoint >= 0xffe0 && codePoint <= 0xffe6) // fullwidth signs
+	)
+		return CJK_TOKENS_PER_CHAR;
+	// Latin-1 accents, Greek, Cyrillic, symbols: one token per character at worst.
+	return 1;
+}
+
 /** Content-aware planning estimate, NOT provider-exact tokenization.
- * ASCII/3 adds uncertainty over chars/4; non-ASCII UTF-8/2 avoids treating
- * Japanese as English. Known wrappers are serialized; safety slack covers
- * adapter overhead. Unusual tokenization may still be rejected by a backend.
+ * ASCII density comes from a measured production rejection: a 2,235,626-character envelope
+ * (93% ASCII JSON with UUIDs/digits/punctuation, 135k kana/han/fullwidth) cost 1,064,377
+ * provider tokens, so three characters per ASCII token was 16% too optimistic. Multibyte
+ * characters are counted per code point instead of per UTF-8 byte so Japanese is never
+ * priced like English. Known wrappers are serialized; the fill ratio covers the remainder.
  */
-function estimateSummaryTextTokens(text: string): number {
-	const ascii = text.replace(/[^\x00-\x7f]/gu, "");
-	return Math.ceil(ascii.length / 3 + Buffer.byteLength(text.replace(/[\x00-\x7f]/gu, "")) / 2);
+export function estimateSummaryTextTokens(text: string): number {
+	let ascii = 0;
+	let tokens = 0;
+	let cursor = 0;
+	for (const match of text.matchAll(/[^\x00-\x7f]+/gu)) {
+		const index = match.index ?? 0;
+		ascii += index - cursor;
+		cursor = index + match[0].length;
+		for (const character of match[0]) tokens += nonAsciiTokens(character.codePointAt(0)!);
+	}
+	ascii += text.length - cursor;
+	return Math.ceil(ascii / ASCII_CHARS_PER_TOKEN + tokens);
 }
 
 /** Measure the full context envelope too, not just raw source characters. */
@@ -277,7 +311,10 @@ export async function generateBoundedSummary(
 			throw new BoundedCompactionError("unknown reasoning adapter output expansion");
 		}
 		const slack = Math.max(4096, Math.ceil(model.contextWindow * 0.05));
-		const inputLimit = model.contextWindow - wireOutput - slack;
+		const inputLimit = Math.min(
+			model.contextWindow - wireOutput - slack,
+			Math.floor(model.contextWindow * FILL_RATIO),
+		);
 		const contextFor = (payload: unknown): Context => ({
 			systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
 			messages: [
