@@ -11,6 +11,7 @@ import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-option
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { estimateSummaryTextTokens } from "../../src/core/compaction/bounded-compaction.ts";
 import { prepareCompaction } from "../../src/core/compaction/compaction.ts";
 import { createHarness, type Harness } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
@@ -109,14 +110,78 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		}
 		let totalInput = 0;
 		for (const { context, options } of captures) {
-			const json = JSON.stringify(context);
-			const ascii = json.replace(/[^\x00-\x7f]/gu, "");
-			const planned = Math.ceil(ascii.length / 3 + Buffer.byteLength(json.replace(/[\x00-\x7f]/gu, "")) / 2);
+			const planned = estimateSummaryTextTokens(JSON.stringify(context));
 			totalInput += planned;
+			// The fill target keeps a fifth of the registered window unused for estimate error.
+			expect(planned).toBeLessThanOrEqual(Math.floor(window * 0.8));
 			expect(planned + options!.maxTokens! + Math.max(4096, window * 0.05)).toBeLessThanOrEqual(window);
 		}
 		expect(totalInput).toBeLessThanOrEqual(2000000);
-		expect(captures.reduce((n, c) => n + c.options!.maxTokens!, 0)).toBe(window === 1000000 ? 13107 : 65535);
+		expect(captures.reduce((n, c) => n + c.options!.maxTokens!, 0)).toBe(window === 1000000 ? 13107 : 78642);
+	});
+
+	it("prices dense Japanese/JSON source at the measured provider rate", () => {
+		// Production rejection for this envelope shape: 2,235,626 characters (2,088,589 ASCII JSON
+		// with UUIDs/digits/punctuation, 135,132 kana/han/fullwidth, 11,889 other non-ASCII, 8 astral)
+		// cost 1,064,377 provider tokens against a 1,000,000 limit. The previous ASCII/3 + UTF-8/2
+		// estimate said 916,626, accepted it as one request under the 936,893 allowance and the
+		// provider rejected it; the content-aware estimate must never accept that request.
+		const text =
+			"a".repeat(2_088_589) +
+			"あ".repeat(71_286) +
+			"ア".repeat(17_517) +
+			"漢".repeat(42_870) +
+			"！".repeat(3_459) +
+			"→".repeat(11_889) +
+			"😀".repeat(8);
+		const previous = Math.ceil(
+			text.replace(/[^\x00-\x7f]/gu, "").length / 3 + Buffer.byteLength(text.replace(/[\x00-\x7f]/gu, "")) / 2,
+		);
+		expect(previous).toBeLessThanOrEqual(936_893);
+		expect(estimateSummaryTextTokens(text)).toBeGreaterThanOrEqual(1_000_000);
+		expect(estimateSummaryTextTokens(text)).toBeGreaterThanOrEqual(Math.floor(1_064_377 * 0.98));
+	});
+
+	it("splits dense Japanese/JSON history the previous estimate packed into one over-limit request", async () => {
+		const window = 1_000_000;
+		const { h, captures } = await setup("dense history", window);
+		const record = (index: number) =>
+			`{"path":"src/日本語-fixture-${index}.ts","id":"0199a1b2-3c4d-7e5f-8a9b-0c1d2e3f4a${String(index % 100).padStart(2, "0")}","bytes":1234567890,"note":"進捗を確認してください。"}\n`;
+		for (let chunk = 0; chunk < 10; chunk++) {
+			const text = Array.from({ length: 1200 }, (_, i) => record(chunk * 1200 + i)).join("");
+			h.sessionManager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+			h.sessionManager.appendMessage(fauxAssistantMessage("確認しました。続けます。"));
+		}
+		h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+		await h.session.compact();
+		const leaves = captures.map(payload).filter((p) => p.kind === "leaf");
+		// One request cannot carry this content inside the fill target, and the plan stays small.
+		expect(leaves.length).toBeGreaterThan(1);
+		expect(captures.length).toBeLessThanOrEqual(4);
+		// Every fixture record is summarized exactly once, with no loss or duplication.
+		const summarized = leaves
+			.flatMap((p) => p.owned)
+			.map((s) => s.text)
+			.join("");
+		expect(summarized.match(/"note":"進捗を確認してください。"/gu)).toHaveLength(12_000);
+		expect(summarized).toContain(record(0));
+		expect(summarized).toContain(record(11_999));
+		expect(summarized.length).toBeGreaterThan(1_400_000);
+		for (const { context, options } of captures) {
+			const planned = estimateSummaryTextTokens(JSON.stringify(context));
+			expect(planned).toBeLessThanOrEqual(Math.floor(window * 0.8));
+			expect(options?.maxTokens).toBe(13107);
+		}
+	});
+
+	it("keeps one call for a large ASCII history inside the fill target", async () => {
+		const window = 1_000_000;
+		const { h, captures } = await setup("a".repeat(1_800_000), window);
+		await h.session.compact();
+		expect(captures).toHaveLength(1);
+		const planned = estimateSummaryTextTokens(JSON.stringify(captures[0].context));
+		expect(planned).toBeGreaterThan(700_000);
+		expect(planned).toBeLessThanOrEqual(Math.floor(window * 0.8));
 	});
 
 	it("accepts a complete meaningful summary beyond the obsolete 16KB checkpoint cap", async () => {
@@ -231,10 +296,8 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		const result = await h.session.compact();
 		for (const { context, options } of captures) {
 			// Amendment: constructed input follows the registered window, not fixed 48k/128KB.
-			const json = JSON.stringify(context);
-			const planned = Math.ceil(
-				json.replace(/[^\x00-\x7f]/gu, "").length / 3 + Buffer.byteLength(json.replace(/[\x00-\x7f]/gu, "")) / 2,
-			);
+			const planned = estimateSummaryTextTokens(JSON.stringify(context));
+			expect(planned).toBeLessThanOrEqual(Math.floor(200000 * 0.8));
 			expect(planned + options!.maxTokens! + 10000).toBeLessThanOrEqual(200000);
 			expect(options?.maxTokens).toBe(13107);
 			expect(clampMaxTokensToContext(h.getModel(), context, options!.maxTokens!)).toBe(13107);
@@ -635,10 +698,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		let lastInput = 0;
 		h.setResponses(
 			Array.from({ length: 100 }, () => (context: Context) => {
-				const json = JSON.stringify(context);
-				lastInput = Math.ceil(
-					json.replace(/[^\x00-\x7f]/gu, "").length / 3 + Buffer.byteLength(json.replace(/[\x00-\x7f]/gu, "")) / 2,
-				);
+				lastInput = estimateSummaryTextTokens(JSON.stringify(context));
 				spent += lastInput;
 				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" });
 			}),
@@ -725,7 +785,9 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 	it("preflights an otherwise legal multi-leaf plan against the whole-job deadline", async () => {
 		// Amendment replaces mandatory 32-leaf/31-merge success: even legal
 		// envelopes must leave a practical serial request allowance in eight minutes.
-		const { h, captures } = await setup("a".repeat(4000000), 50000);
+		// 3,000,000 ASCII characters plan 31 leaves; a larger fixture would hit the
+		// 32-leaf ceiling before the deadline preflight.
+		const { h, captures } = await setup("a".repeat(3000000), 50000);
 		h.settingsManager.applyOverrides({ compaction: { reserveTokens: 2048 } });
 		const prefix = readFileSync(h.session.sessionFile!, "utf8");
 		const leaf = h.sessionManager.getLeafId();

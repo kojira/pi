@@ -184,3 +184,53 @@ Final local check and isolated full suite pass (coding-agent: 2341 passed,
 2 expected failures, 50 skipped); exact-head CI and independent review are
 separate required gates. The first full run exposed only an obsolete fixed8192
 assertion, updated to the approved reserve/model-derived allowance and rechecked.
+
+## Content-aware estimate and fill-target amendment (source/PR/offline only)
+
+Supersedes the model-aware amendment's "ASCII/3 and non-ASCII UTF-8/2" planning
+estimate and its per-request input allowance. Source identity, history
+preservation, one-shot preference, largest-fitting reduction, output allowance,
+defaults suppression and the fail-closed pre-prompt gate are unchanged.
+
+Measured cause on the deployed PR39 build, channel `dc:1510466645770895370`:
+the planner sized one summary request at 916,626 estimated tokens against a
+936,893 allowance and the provider rejected that same request at 1,064,377
+tokens > 1,000,000 (offline capture of the preserved session aborted before
+dispatch; zero provider calls). The serialized envelope was 2,235,626
+characters: 2,088,589 ASCII (JSON keys, UUIDs, decimal ids, paths, punctuation),
+135,132 kana/han/fullwidth and 11,889 other non-ASCII. Pricing ASCII at three
+characters per token was therefore 16% too optimistic; the kana factor was not
+the primary error.
+
+- Planning estimate (`estimateSummaryTextTokens`, still a local pure function):
+  ASCII at 2.5 characters per token, kana/han/Hangul/fullwidth at 1.5 tokens per
+  code point, other non-ASCII at 1, astral code points (emoji) at 2. It counts
+  code points, never UTF-8 bytes, so Japanese is not priced like English. No
+  tokenizer dependency, no remote count call, no model/provider/catalog change.
+  On the rejected envelope it returns 1,050,023, 1.3% below the measured
+  provider count and above the model limit, so that request cannot be planned.
+- Fill target: every constructed leaf or merge request - previous summary,
+  instructions, custom focus, labels, overlap and wrappers included - must fit
+  `min(C-wireOutput-S, floor(0.8*C))`. The unused fifth of the window is the
+  reserve for estimate error, system/tool overhead, wrapper/injection variance
+  and tokenizer drift. It is a bound on planned size, not a substitute for the
+  content-aware estimate: 80% of C with a chars/4 underestimate is still unsafe.
+  One summary request remains the plan when the whole content fits that target.
+- Still fail-closed: if required compaction fails, the ordinary prompt and the
+  next assistant continuation are refused; no partial checkpoint is installed.
+
+| Seam | Assertion RED -> minimal GREEN | Retained evidence / prohibited shortcut |
+| --- | --- | --- |
+| Planner estimate | Production envelope composition (2,088,589 ASCII, 135,132 kana/han/fullwidth, 11,889 other non-ASCII, 8 astral) -> estimate above the 1,000,000 limit and within 2% of the measured 1,064,377 tokens, while the previous ASCII/3 formula stays under the 936,893 allowance | Local pure estimate; no provider call, no tokenizer dependency, no arbitrary global multiplier as the only change |
+| Native plan, dense Japanese/JSON | 12,000 fixture records, 1,440,890 characters, C=1M: previous estimate accepted one request -> two leaves plus one merge, every constructed request inside 0.8*C, all records summarized once | No over-splitting back to fixed small caps; no source loss or duplication; plan stays at three calls |
+| Native plan, large ASCII | 1,800,000 ASCII characters, C=1M -> exactly one summary call at 721,080 planned input, inside 0.8*C | One-shot preference preserved for content that fits the target; no brim-packing |
+
+Resource witness (offline, faux streams, zero provider calls, unchanged session
+bytes): the two-call/one-merge dense plan above is 3 calls, 790,063 + 200,096 +
+1,360 planned input tokens and 13,107 reserved output; the large-ASCII fixture is
+1 call, 721,080 planned input. The generic Japanese/ASCII fixture of the prior
+amendment now uses one leaf at C=1M (719,751 planned input) and five leaves plus
+one merge at C=200k (786,642 reserved output), superseding its four-leaf witness.
+These remain planned resources, not measured provider counts or charges; probe
+of real semantic fidelity, latency and provider-exact tokenization remains out
+of scope. Exact-head CI and independent review are separate required gates.
