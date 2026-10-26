@@ -12,7 +12,11 @@ preferWorkspacePackages: true
 
 overrides:
   shell-quote: 1.12.0
-  '@modelcontextprotocol/sdk': 1.31.0
+  '@modelcontextprotocol/sdk': 1.32.0
+  'zod@>=4.0.0 <4.6.6': 4.6.6
+  body-parser: 2.4.0
+  vite: 8.2.4
+  source-map-js: 1.2.2
 
 auditConfig:
   ignoreGhsas:
@@ -20,3 +24,9 @@ auditConfig:
     # example gondolin extension, not the coding-agent runtime.
     # TODO: remove once node-forge ships a fix (>1.4.0) and bump gondolin.
     - GHSA-86w9-cpqp-85rv
+    # zod <4.6.6 is fixed by the override above for zod 4.x consumers.
+    # @anthropic-ai/sandbox-runtime (example extension only) still requires
+    # zod ^3, where the 4.x patch does not apply; drop this once it ships a
+    # zod 4 release.
+    - GHSA-mrhx-c7xc-m3w5
+
