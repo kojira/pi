@@ -3,6 +3,9 @@
 Status: approved for source implementation, offline validation and PR/CI only.
 Base: `475a5ceda5e6078bf5ee9a815e6e1a77cbc2e269`.
 
+The bounded parallel leaf amendment below supersedes C5's serial leaf execution.
+All resource ceilings and the eight-minute absolute deadline remain unchanged.
+
 ## Problem and visible outcome
 
 An incorrect context-window registration is a separate configuration defect; a registered 200k window is not evidence of a model's intrinsic capacity. This design does not correct model metadata or establish backend/account entitlement. For a genuinely smaller registered window, an older large conversation can exceed the available one-shot compaction budget. The output clamp can then leave one token. Structural leaves with bounded preceding context and serial adjacent binary reduction prevent that gross oversized summarization request. Existing native entry points remain the user interface. No deployment, merge, live API QC, recovery, runtime session changes, provider changes or dependency updates are authorized.
@@ -234,3 +237,59 @@ one merge at C=200k (786,642 reserved output), superseding its four-leaf witness
 These remain planned resources, not measured provider counts or charges; probe
 of real semantic fidelity, latency and provider-exact tokenization remains out
 of scope. Exact-head CI and independent review are separate required gates.
+
+## Bounded parallel leaf amendment (approved v3; source/offline only)
+
+Serial leaves can consume the entire eight-minute budget before reduction. A
+four-leaf latency trace of 124145/126159/126933/77404ms leaves only about 25s for
+the merge. Increasing the deadline is not the correction: summarize independent
+leaves with concurrency **2**, then merge validated children in chronological
+order. Adjacent merge grouping and serial merge execution stay unchanged.
+
+- Two workers take chronological leaf indices. Each result is installed only in
+  its indexed in-memory slot after validation. Reduction starts only after the
+  whole leaf barrier succeeds, regardless of completion order.
+- Keep 32 leaves, 31 merges, depth 5, 64 physical attempts, 2,000,000 estimated
+  input tokens, 524,288 reserved wire-output tokens and the **480000ms absolute
+  deadline**, including planning, retries and backoff. The conservative serial
+  15s-per-planned-call admission heuristic is unchanged. Reserve shared budgets
+  synchronously before every dispatch, including retries; no refunds on failure.
+  A retry occupies its worker slot, so throttling cannot create extra fanout.
+- On first terminal failure or external abort, stop admission and cancel all
+  sibling requests/backoffs. Observe and settle every worker before returning;
+  retain the first causal error rather than a later sibling cancellation. Race
+  opaque provider and retry-callback promises against cancellation so they cannot
+  extend the job indefinitely. Such external code may ignore cancellation, but
+  its promises remain observed and late results cannot merge or append. No new
+  persisted job state, resume mechanism or public progress event is introduced.
+- Preserve the original automatic compaction failure at the unsafe prompt gate
+  in both the message and `Error.cause`, including same-preparation suppression.
+  Associate diagnostics with the existing preparation key, not a new latch;
+  retain the existing policy allowing safe small context and changed conditions.
+  No failure authorizes an ordinary request on unsafe context or a partial native
+  checkpoint. Native preappend signal/identity checks remain authoritative.
+
+Offline regression evidence is in
+`test/suite/agent-session-parallel-compaction.test.ts`, using the existing harness,
+synthetic source and faux provider only. Controlled promises prove two-leaf
+admission, out-of-order completion, chronological merge and a complete barrier.
+Fake timers reproduce the slow trace with a synthetic 40s merge: serial needs
+494641ms, while parallel leaf starts are 0/0/124145/126159ms, merge starts at
+251078ms, and one native checkpoint finishes at **291078ms**. The next ordinary
+request succeeds. Separate tests cover the unchanged absolute deadline, terminal
+failure, external cancellation, late sibling rejection, synchronous abort during
+dispatch, Retry-After cancellation and shared attempt/input/output exhaustion.
+The existing continuation regression now permits the already-dispatched sibling
+but still forbids any ordinary request after failure. Prompt tests require the
+original deadline diagnosis on both initial failure and suppressed retry.
+
+Initial source-baseline checks observed one outstanding leaf instead of two and
+the generic unsafe-context error instead of the deadline cause. A serial-worker
+mutation also fails the slow regression specifically with the eight-minute
+deadline error; restoring two workers passes. The 14 new regressions and focused
+compatibility set pass (158 tests, 15 skipped). Root `pnpm run check`, the offline
+build and isolated `./test.sh` pass (coding-agent: 2359 passed, 2 expected failures,
+50 skipped). Offline tests prove scheduling and native failure atomicity, not live
+provider fidelity, subscription cost, production recovery or deployment.
+Exact-head independent review and CI remain required; no private source history
+is included.

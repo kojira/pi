@@ -367,6 +367,7 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionGeneration = 0;
 	private _autoCompactionFailureGeneration = 0;
+	private _autoCompactionFailure: { key: string | undefined; error: unknown } | undefined;
 	/** A truncated threshold summary is not retried after every tool in the same user turn. */
 	private _failedThresholdSummaryKey: string | undefined;
 	private _continuationCancellationGeneration = 0;
@@ -623,8 +624,10 @@ export class AgentSession {
 		}
 
 		const summaryKey = this._thresholdSummaryKey();
-		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey)
-			throw new BoundedCompactionError("required compaction previously failed; context remains unsafe");
+		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) {
+			this._assertRequiredCompactionReady(context.messages);
+			return context;
+		}
 
 		const compactionGeneration = this._autoCompactionGeneration;
 		const cancellationGeneration = this._continuationCancellationGeneration;
@@ -668,11 +671,15 @@ export class AgentSession {
 	}
 
 	/** A failed/suppressed required compact is not permission to submit unchanged input. */
-	private _assertRequiredCompactionReady(): void {
-		if (this._requiresCompaction(this.agent.state.messages))
-			throw new BoundedCompactionError(
-				"required compaction did not make context safe; ordinary request not submitted",
-			);
+	private _assertRequiredCompactionReady(messages = this.agent.state.messages): void {
+		if (!this._requiresCompaction(messages)) return;
+		const failure = this._autoCompactionFailure;
+		const cause = failure?.key === this._thresholdSummaryKey() ? failure?.error : undefined;
+		const detail = cause === undefined ? "" : `; cause: ${cause instanceof Error ? cause.message : String(cause)}`;
+		throw new BoundedCompactionError(
+			`required compaction did not make context safe; ordinary request not submitted${detail}`,
+			{ cause },
+		);
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -2579,6 +2586,7 @@ export class AgentSession {
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
+		this._autoCompactionFailure = undefined;
 		let started = false;
 		let fromExtension = false;
 
@@ -2741,6 +2749,7 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			this._autoCompactionFailureGeneration++;
+			this._autoCompactionFailure = { key: this._thresholdSummaryKey(), error };
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
 				this._autoCompactionAbortController?.signal.aborted === true ||

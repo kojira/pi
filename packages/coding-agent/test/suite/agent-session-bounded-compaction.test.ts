@@ -273,12 +273,15 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			}),
 			fauxAssistantMessage(checkpoint, { stopReason: "length" }),
 			(context) => {
+				// The second leaf may already be in flight when the first fails.
+				if (context.systemPrompt?.includes("context summarization assistant"))
+					return fauxAssistantMessage(checkpoint);
 				ordinary++;
 				return workResponse("must not continue", context);
 			},
 		]);
 		await h.session.prompt("grow context").catch(() => {});
-		expect(h.faux.state.callCount).toBe(2);
+		expect(h.faux.state.callCount).toBe(3);
 		expect(ordinary).toBe(0);
 		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
