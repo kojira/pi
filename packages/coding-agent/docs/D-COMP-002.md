@@ -243,10 +243,11 @@ of scope. Exact-head CI and independent review are separate required gates.
 Serial leaves can consume the entire eight-minute budget before reduction. A
 four-leaf latency trace of 124145/126159/126933/77404ms leaves only about 25s for
 the merge. Increasing the deadline is not the correction: summarize independent
-leaves with concurrency **2**, then merge validated children in chronological
-order. Adjacent merge grouping and serial merge execution stay unchanged.
+leaves with concurrency **4**, then merge validated children in chronological
+order. This supersedes the initial two-worker limit per the latest operator
+approval. Adjacent merge grouping and serial merge execution stay unchanged.
 
-- Two workers take chronological leaf indices. Each result is installed only in
+- Four workers take chronological leaf indices. Each result is installed only in
   its indexed in-memory slot after validation. Reduction starts only after the
   whole leaf barrier succeeds, regardless of completion order.
 - Keep 32 leaves, 31 merges, depth 5, 64 physical attempts, 2,000,000 estimated
@@ -255,6 +256,7 @@ order. Adjacent merge grouping and serial merge execution stay unchanged.
   15s-per-planned-call admission heuristic is unchanged. Reserve shared budgets
   synchronously before every dispatch, including retries; no refunds on failure.
   A retry occupies its worker slot, so throttling cannot create extra fanout.
+  Four requests may still rate-limit; bounded retries honor Retry-After.
 - On first terminal failure or external abort, stop admission and cancel all
   sibling requests/backoffs. Observe and settle every worker before returning;
   retain the first causal error rather than a later sibling cancellation. Race
@@ -271,11 +273,12 @@ order. Adjacent merge grouping and serial merge execution stay unchanged.
 
 Offline regression evidence is in
 `test/suite/agent-session-parallel-compaction.test.ts`, using the existing harness,
-synthetic source and faux provider only. Controlled promises prove two-leaf
-admission, out-of-order completion, chronological merge and a complete barrier.
+synthetic source and faux provider only. A six-leaf controlled-promise fixture
+proves four simultaneous starts, bounded admission of the remaining two leaves,
+out-of-order completion, chronological merge and a complete barrier.
 Fake timers reproduce the slow trace with a synthetic 40s merge: serial needs
-494641ms, while parallel leaf starts are 0/0/124145/126159ms, merge starts at
-251078ms, and one native checkpoint finishes at **291078ms**. The next ordinary
+494641ms, while all four parallel leaves start at 0ms, merge starts at
+126933ms, and one native checkpoint finishes at **166933ms**. The next ordinary
 request succeeds. Separate tests cover the unchanged absolute deadline, terminal
 failure, external cancellation, late sibling rejection, synchronous abort during
 dispatch, Retry-After cancellation and shared attempt/input/output exhaustion.
@@ -283,13 +286,14 @@ The existing continuation regression now permits the already-dispatched sibling
 but still forbids any ordinary request after failure. Prompt tests require the
 original deadline diagnosis on both initial failure and suppressed retry.
 
-Initial source-baseline checks observed one outstanding leaf instead of two and
-the generic unsafe-context error instead of the deadline cause. A serial-worker
-mutation also fails the slow regression specifically with the eight-minute
-deadline error; restoring two workers passes. The 14 new regressions and focused
-compatibility set pass (158 tests, 15 skipped). Root `pnpm run check`, the offline
-build and isolated `./test.sh` pass (coding-agent: 2359 passed, 2 expected failures,
-50 skipped). Offline tests prove scheduling and native failure atomicity, not live
-provider fidelity, subscription cost, production recovery or deployment.
+Initial source-baseline checks observed serial execution and the generic
+unsafe-context error instead of the deadline cause. A serial-worker mutation
+failed the slow regression specifically with the eight-minute deadline error.
+The four-worker admission regression also fails on the two-worker implementation
+(expected four outstanding requests, observed two). Four-worker coverage includes
+successful simultaneous 429 retries followed by an ordered merge, shared budget
+exhaustion, cancellation of all four workers and no admission of queued leaves
+after failure. Offline tests prove scheduling and native failure atomicity, not
+live provider fidelity, subscription cost, production recovery or deployment.
 Exact-head independent review and CI remain required; no private source history
 is included.

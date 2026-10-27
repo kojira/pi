@@ -39,14 +39,14 @@ describe("AgentSession parallel bounded compaction", () => {
 		for (const h of harnesses.splice(0)) h.cleanup();
 	});
 
-	async function setup(size = 360000, contextWindow = 200000) {
+	async function setup(size = 360000, contextWindow = 200000, sourceCount = 4) {
 		const h = await createHarness({
 			persistent: true,
 			models: [{ id: "parallel", contextWindow, maxTokens: 32000 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 }, retry: { enabled: false } },
 		});
 		harnesses.push(h);
-		for (let i = 0; i < 4; i++) {
+		for (let i = 0; i < sourceCount; i++) {
 			h.sessionManager.appendMessage({
 				role: "user",
 				content: `${i}: ${"a".repeat(size)}`,
@@ -88,33 +88,35 @@ describe("AgentSession parallel bounded compaction", () => {
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
 	}
 
-	it("overlaps only two leaves, admits on completion, and merges in source order after the barrier", async () => {
-		const h = await setup();
+	it("starts four leaves together, bounds admission, and merges out-of-order completions in source order", async () => {
+		const h = await setup(360000, 200000, 6);
 		vi.useFakeTimers();
 		const pending = controlled(h);
 		const before = readFileSync(h.session.sessionFile!, "utf8");
 		const completion = h.session.compact().catch((error: unknown) => error);
 		await vi.advanceTimersByTimeAsync(0);
-		expect(pending).toHaveLength(2);
-		for (const index of [1, 2, 3]) {
+		expect(pending).toHaveLength(4);
+		for (const [step, index] of [3, 1, 5, 4, 2].entries()) {
 			pending[index].resolve(fauxAssistantMessage(checkpoint.replace("References.", `leaf-${index}`)));
 			await vi.advanceTimersByTimeAsync(0);
-			expect(pending).toHaveLength(Math.min(index + 2, 4));
+			expect(pending).toHaveLength(Math.min(step + 5, 6));
 			expect(pending.every((p) => p.payload.kind === "leaf")).toBe(true);
 		}
 		unchanged(h, before);
 		pending[0].resolve(fauxAssistantMessage(checkpoint.replace("References.", "leaf-0")));
 		await vi.advanceTimersByTimeAsync(0);
-		expect(pending).toHaveLength(5);
-		expect(pending[4].payload.kind).toBe("merge");
-		expect(pending[4].payload.children?.map((c) => c.first.sourceIndex)).toEqual([0, 1, 2, 3]);
-		expect(pending[4].payload.children?.map((c) => c.text.split("\n").at(-1))).toEqual([
+		expect(pending).toHaveLength(7);
+		expect(pending[6].payload.kind).toBe("merge");
+		expect(pending[6].payload.children?.map((c) => c.first.sourceIndex)).toEqual([0, 1, 2, 3, 4, 5]);
+		expect(pending[6].payload.children?.map((c) => c.text.split("\n").at(-1))).toEqual([
 			"leaf-0",
 			"leaf-1",
 			"leaf-2",
 			"leaf-3",
+			"leaf-4",
+			"leaf-5",
 		]);
-		pending[4].resolve(fauxAssistantMessage(checkpoint));
+		pending[6].resolve(fauxAssistantMessage(checkpoint));
 		expect(await completion).toMatchObject({ summary: checkpoint });
 		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(1);
@@ -153,9 +155,9 @@ describe("AgentSession parallel bounded compaction", () => {
 			.catch((error: unknown) => error);
 		await vi.advanceTimersByTimeAsync(480000);
 		expect(await completion).toMatchObject({ summary: checkpoint });
-		expect(finishedAt).toBe(291078);
-		expect(starts).toEqual([0, 0, 124145, 126159, 251078]);
-		expect(completed).toEqual([0, 1, 3, 2, 4]);
+		expect(finishedAt).toBe(166933);
+		expect(starts).toEqual([0, 0, 0, 0, 126933]);
+		expect(completed).toEqual([3, 0, 1, 2, 4]);
 		expect(requests.map((p) => p.kind)).toEqual(["leaf", "leaf", "leaf", "leaf", "merge"]);
 		expect(h.eventsOfType("compaction_end")[0].result).toBeDefined();
 		h.setResponses([(context) => workResponse("safe next request", context)]);
@@ -166,15 +168,15 @@ describe("AgentSession parallel bounded compaction", () => {
 	});
 
 	it.each(["failure", "abort", "deadline"] as const)(
-		"cancels both workers on %s, observes late results, and never appends",
+		"cancels all four workers on %s, stops admission, observes late results, and never appends",
 		async (mode) => {
-			const h = await setup();
+			const h = await setup(360000, 200000, 6);
 			vi.useFakeTimers();
 			const pending = controlled(h);
 			const before = readFileSync(h.session.sessionFile!, "utf8");
 			const completion = h.session.compact().catch((error: unknown) => error);
 			await vi.advanceTimersByTimeAsync(0);
-			expect(pending).toHaveLength(2);
+			expect(pending).toHaveLength(4);
 			if (mode === "failure") pending[1].resolve(fauxAssistantMessage("invalid structured checkpoint"));
 			else if (mode === "abort") h.session.abortCompaction();
 			else await vi.advanceTimersByTimeAsync(480000);
@@ -186,9 +188,9 @@ describe("AgentSession parallel bounded compaction", () => {
 			expect(pending.every((p) => p.signal.aborted)).toBe(true);
 			unchanged(h, before);
 			pending[0].reject(new Error("late sibling transport error"));
-			pending[1].resolve(fauxAssistantMessage(checkpoint));
+			for (const sibling of pending.slice(1)) sibling.resolve(fauxAssistantMessage(checkpoint));
 			await vi.advanceTimersByTimeAsync(1000000);
-			expect(pending).toHaveLength(2);
+			expect(pending).toHaveLength(4);
 			unchanged(h, before);
 			expect(h.eventsOfType("compaction_end")).toHaveLength(1);
 		},
@@ -200,6 +202,7 @@ describe("AgentSession parallel bounded compaction", () => {
 			const h = await setup(
 				limit === "input" ? 360000 : limit === "output" ? 100000 : 70000,
 				limit === "attempt" ? 50000 : 200000,
+				limit === "output" ? 10 : 4,
 			);
 			h.settingsManager.applyOverrides({
 				compaction: { reserveTokens: limit === "output" ? 16384 : 2048 },
@@ -219,8 +222,8 @@ describe("AgentSession parallel bounded compaction", () => {
 					input += lastInput;
 					output += options!.maxTokens!;
 					expect(options!.maxRetries).toBe(0);
-					// The large first leaf succeeds; the small sibling exhausts output through retries.
-					if (limit === "output" && starts.length === 1) return fauxAssistantMessage(checkpoint);
+					// Three large leaves succeed; the small fourth exhausts output through retries.
+					if (limit === "output" && starts.length <= 3) return fauxAssistantMessage(checkpoint);
 					void options!.onResponse?.({ status: 429, headers: { "retry-after": "1" } }, h.getModel());
 					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" });
 				}),
@@ -229,7 +232,7 @@ describe("AgentSession parallel bounded compaction", () => {
 			const completion = h.session.compact().catch((error: unknown) => error);
 			await vi.advanceTimersByTimeAsync(999);
 			if (starts.length === 0) throw await completion;
-			expect(starts).toHaveLength(2);
+			expect(starts).toHaveLength(4);
 			await vi.advanceTimersByTimeAsync(100000);
 			expect(await completion).toMatchObject({ message: expect.stringContaining("budget exhausted") });
 			expect(starts.length).toBeLessThanOrEqual(64);
@@ -243,25 +246,72 @@ describe("AgentSession parallel bounded compaction", () => {
 		},
 	);
 
-	it("cancels parallel Retry-After backoff and an in-flight sibling without admitting retries", async () => {
+	it("retries four simultaneous 429s within shared budgets and merges successful retries in source order", async () => {
 		const h = await setup();
+		h.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } });
+		vi.useFakeTimers();
+		const attempts = new Map<number, number>();
+		const starts: number[] = [];
+		const started = Date.now();
+		let input = 0;
+		let output = 0;
+		h.setResponses(
+			Array.from({ length: 9 }, () => (context: Context, options: SimpleStreamOptions | undefined) => {
+				starts.push(Date.now() - started);
+				input += estimateSummaryTextTokens(JSON.stringify(context));
+				output += options!.maxTokens!;
+				expect(options!.maxRetries).toBe(0);
+				const request = payload(context);
+				if (request.kind === "merge") {
+					expect(request.children?.map((child) => child.text.split("\n").at(-1))).toEqual([
+						"leaf-0",
+						"leaf-1",
+						"leaf-2",
+						"leaf-3",
+					]);
+					return fauxAssistantMessage(checkpoint);
+				}
+				const index = request.owned![0].sourceIndex;
+				const attempt = (attempts.get(index) ?? 0) + 1;
+				attempts.set(index, attempt);
+				if (attempt === 1) {
+					void options!.onResponse?.({ status: 429, headers: { "retry-after": "1" } }, h.getModel());
+					return fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" });
+				}
+				return fauxAssistantMessage(checkpoint.replace("References.", `leaf-${index}`));
+			}),
+		);
+		const completion = h.session.compact();
+		await vi.advanceTimersByTimeAsync(999);
+		expect(starts).toEqual([0, 0, 0, 0]);
+		await vi.advanceTimersByTimeAsync(1);
+		await completion;
+		expect(starts).toEqual([0, 0, 0, 0, 1000, 1000, 1000, 1000, 1000]);
+		expect([...attempts.values()]).toEqual([2, 2, 2, 2]);
+		expect(input).toBeLessThanOrEqual(2000000);
+		expect(output).toBe(9 * 13107);
+		expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("cancels Retry-After backoff and three in-flight siblings without admitting retries or queued leaves", async () => {
+		const h = await setup(360000, 200000, 6);
 		h.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 0 } });
 		vi.useFakeTimers();
 		const pending = controlled(h);
 		const before = readFileSync(h.session.sessionFile!, "utf8");
 		const completion = h.session.compact().catch((error: unknown) => error);
 		await vi.advanceTimersByTimeAsync(0);
-		expect(pending).toHaveLength(2);
+		expect(pending).toHaveLength(4);
 		void pending[0].options.onResponse?.({ status: 429, headers: { "retry-after": "60" } }, h.getModel());
 		pending[0].resolve(fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" }));
 		await vi.advanceTimersByTimeAsync(1000);
 		expect(h.eventsOfType("summarization_retry_scheduled")[0].delayMs).toBe(60000);
-		expect(pending).toHaveLength(2);
+		expect(pending).toHaveLength(4);
 		h.session.abortCompaction();
 		expect(await completion).toMatchObject({ name: "AbortError" });
-		pending[1].resolve(fauxAssistantMessage(checkpoint));
+		for (const sibling of pending.slice(1)) sibling.resolve(fauxAssistantMessage(checkpoint));
 		await vi.advanceTimersByTimeAsync(480000);
-		expect(pending).toHaveLength(2);
+		expect(pending).toHaveLength(4);
 		expect(pending.every((p) => p.signal.aborted)).toBe(true);
 		unchanged(h, before);
 	});
@@ -288,8 +338,8 @@ describe("AgentSession parallel bounded compaction", () => {
 			h.setResponses(
 				Array.from({ length: 8 }, (_, i) =>
 					fauxAssistantMessage(
-						i < 2 ? "" : checkpoint,
-						i < 2 ? { stopReason: "error", errorMessage: "429 rate limited" } : {},
+						i < 4 ? "" : checkpoint,
+						i < 4 ? { stopReason: "error", errorMessage: "429 rate limited" } : {},
 					),
 				),
 			);
@@ -311,7 +361,7 @@ describe("AgentSession parallel bounded compaction", () => {
 			).catch((error: unknown) => error);
 			await vi.advanceTimersByTimeAsync(480000);
 			expect(await completion).toMatchObject({ message: expect.stringContaining("8-minute deadline exceeded") });
-			expect(h.faux.state.callCount).toBe(callback === "onRetryFinished" ? 4 : 2);
+			expect(h.faux.state.callCount).toBe(callback === "onRetryFinished" ? 8 : 4);
 		},
 	);
 
@@ -330,7 +380,7 @@ describe("AgentSession parallel bounded compaction", () => {
 			cause: expect.objectContaining({ message: expect.stringContaining("8-minute deadline exceeded") }),
 		});
 		await expect(h.session.prompt("still unsubmitted")).rejects.toThrow(/8-minute deadline exceeded/);
-		expect(pending).toHaveLength(2);
+		expect(pending).toHaveLength(4);
 		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
 		unchanged(h, before);
 	});

@@ -21,7 +21,7 @@ import { SUMMARIZATION_SYSTEM_PROMPT, type SummarySource } from "./utils.ts";
 
 // D-COMP-002 resource ceilings, not an authorization to make paid calls.
 const MAX_LEAVES = 32;
-const LEAF_CONCURRENCY = 2;
+const LEAF_CONCURRENCY = 4;
 const MAX_ATTEMPTS = 64;
 const MAX_JOB_INPUT = 2000000;
 const MAX_JOB_OUTPUT = 524288;
@@ -466,7 +466,7 @@ export async function generateBoundedSummary(
 						outputReserved + wireOutput > MAX_JOB_OUTPUT
 					)
 						throw new BoundedCompactionError("physical attempt/input/reserved-output budget exhausted");
-					// Shared by both leaf workers: no await between admission and reservation.
+					// Shared by all leaf workers: no await between admission and reservation.
 					// Retries reserve again and never refund an already dispatched attempt.
 					attempts++;
 					inputSpent += size.tokens;
