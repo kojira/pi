@@ -12,7 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { SteeringDeliveryUncertainError } from "../../core/agent-session.ts";
+import { GuardedPromptRefusal, SteeringDeliveryUncertainError } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
@@ -401,16 +401,27 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						images: command.images,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",
+						expectedSettingsRevision: command.expectedSettingsRevision,
 						preflightResult: (didSucceed) => {
 							if (didSucceed) {
 								preflightSucceeded = true;
-								output(success(id, "prompt"));
+								output(
+									success(
+										id,
+										"prompt",
+										command.expectedSettingsRevision === undefined ? undefined : { accepted: true },
+									),
+								);
 							}
 						},
 					})
 					.catch((e) => {
 						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
+							output(
+								e instanceof GuardedPromptRefusal
+									? success(id, "prompt", { accepted: false, reason: e.reason })
+									: error(id, "prompt", e.message),
+							);
 						}
 					});
 				return undefined;
@@ -495,7 +506,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
-					capabilities: { guardedSteer: 1 },
+					capabilities: { guardedSteer: 1, guardedSettings: 1 },
+					settingsRevision: session.settingsRevision,
 				};
 				return success(id, "get_state", state);
 			}
@@ -503,6 +515,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 			// Model
 			// =================================================================
+
+			case "set_runtime_settings": {
+				return success(id, "set_runtime_settings", await session.setRuntimeSettings(command));
+			}
 
 			case "set_model": {
 				const models = session.modelRuntime.getAvailableSnapshot();
