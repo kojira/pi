@@ -77,6 +77,32 @@ Response:
 
 The `images` field is optional. Each image uses `ImageContent` format: `{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}`.
 
+##### Guarded prompt admission
+
+When `get_state.data.capabilities.guardedSettings === 1`, send the observed
+`settingsRevision` with an ordinary prompt:
+
+```json
+{"id":"prompt-1","type":"prompt","message":"Continue","expectedSettingsRevision":42}
+```
+
+Before any effectful preflight hook runs, Pi checks the revision and parent idle
+admission. A definite refusal returns `success:true` with
+`data:{"accepted":false,"reason":"busy"}` or
+`data:{"accepted":false,"reason":"settings_changed"}`. It neither queues the
+message nor invokes input/command hooks. Guarded prompts never silently queue
+while busy, even if `streamingBehavior` is supplied.
+
+Successful preflight returns `success:true,data:{"accepted":true}` at the existing
+response boundary. After admission, input/command/`before_agent_start` hooks may
+already have effects. A failure or ordinary settings change during those hooks
+therefore returns the existing `success:false,error` response, **not** a retryable
+`accepted:false`. Native submission is rechecked before committing user input.
+There is exactly one response; failures after a success receipt remain run events.
+Only a definite `accepted:false` permits resubmission. Errors, lost responses and
+timeouts are uncertain acceptance and must not be automatically replayed.
+Omitting the revision preserves legacy prompt behavior.
+
 #### steer
 
 Queue a steering message while the agent is running. It is delivered after the current assistant turn finishes executing its tool calls, before the next LLM call. Skill commands and prompt templates are expanded. Extension commands are not allowed (use `prompt` instead).
@@ -246,7 +272,8 @@ Response:
     "autoCompactionEnabled": true,
     "messageCount": 5,
     "pendingMessageCount": 0,
-    "capabilities": {"guardedSteer": 1}
+    "capabilities": {"guardedSteer": 1, "guardedSettings": 1},
+    "settingsRevision": 42
   }
 }
 ```
@@ -274,6 +301,50 @@ Response:
 Messages are `AgentMessage` objects (see [Message Types](#message-types)).
 
 ### Model
+
+#### set_runtime_settings
+
+Capability-negotiated, atomic parent model/thinking update. Require
+`get_state.data.capabilities.guardedSettings === 1`; do not approximate this with
+`get_state` followed by an unguarded `set_model`.
+
+```json
+{"id":"settings-1","type":"set_runtime_settings","provider":"openai-codex","modelId":"gpt-5.4","thinkingLevel":"medium","expectedRevision":42}
+```
+
+`expectedRevision` is required and must be a nonnegative integer. `provider` and
+`modelId` must both be present or both omitted. Omitted fields retain the current
+selection; retained thinking is clamped to the target model's supported levels.
+No global settings are persisted. On success:
+
+```json
+{"id":"settings-1","type":"response","command":"set_runtime_settings","success":true,"data":{"applied":true,"settingsRevision":43,"model":{"provider":"openai-codex","id":"gpt-5.4"},"thinkingLevel":"medium"}}
+```
+
+A conflict returns `success:true` with
+`data:{"applied":false,"reason":"busy"}` or
+`data:{"applied":false,"reason":"revision_changed"}` without mutation. Invalid
+arguments, unknown models and authentication errors use `success:false,error`.
+Authentication may await while ordinary work proceeds. Pi then rechecks lifecycle,
+revision and parent idle state and commits the pair synchronously before notifying
+extensions. Hooks are not locked; an error after commit is not proof of no mutation.
+
+Admission includes prompt preflight, active run/retry/continuation, compaction
+(including admission before authentication), navigation/replacement/reload and
+pending steering/follow-up queues. It does not stop independent children or alter
+their runtimes. This is not permission to retire a process or invoke manual
+compaction on an active parent. The existing `compact` command is unchanged and
+can abort the parent; there is no guarded compact operation.
+
+`settingsRevision` is a process-local monotonic token, never persisted or reused
+by a replacement session in the same process. Ordinary model/thinking mutations
+and registry model refreshes advance it too. No-op updates retain the revision.
+After reconnect/restart, reread state; do not reuse an old process's token.
+
+The equivalent native API is `session.setRuntimeSettings(update)`, with
+`session.settingsRevision` and `session.prompt(text, {expectedSettingsRevision})`.
+Only `GuardedPromptRefusal` means pre-hook nonacceptance; other native errors after
+guarded admission are not replayable.
 
 #### set_model
 

@@ -268,6 +268,30 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean) => void;
+	/** Guard admission before any effectful preflight; conflicts after admission are not replayable. */
+	expectedSettingsRevision?: number;
+}
+
+export interface RuntimeSettingsUpdate {
+	provider?: string;
+	modelId?: string;
+	thinkingLevel?: ThinkingLevel;
+	expectedRevision: number;
+}
+
+export type RuntimeSettingsResult =
+	| { applied: false; reason: "busy" | "revision_changed" }
+	| { applied: true; settingsRevision: number; model: { provider: string; id: string }; thinkingLevel: ThinkingLevel };
+
+export type GuardedPromptResult = { accepted: true } | { accepted: false; reason: "busy" | "settings_changed" };
+
+/** Only thrown before effectful preflight begins; all later failures have uncertain acceptance. */
+export class GuardedPromptRefusal extends Error {
+	readonly reason: "busy" | "settings_changed";
+	constructor(reason: "busy" | "settings_changed") {
+		super(`Guarded prompt refused: ${reason}`);
+		this.reason = reason;
+	}
 }
 
 /** Options for model/thinking mutations. */
@@ -336,6 +360,9 @@ interface SteeringRun {
 	accepting: boolean;
 }
 
+// Never reuse a revision when an RPC host replaces its session in the same process.
+let nextSettingsRevision = 0;
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -347,6 +374,11 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	private _disposed = false;
+	private _settingsRevision = nextSettingsRevision++;
+	private _settingsIdentity: string | undefined;
+	private _settingsActivities = 0;
+	private _settingsActivityEpoch = 0;
 	private _steeringRun: SteeringRun | undefined;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
@@ -367,6 +399,7 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionGeneration = 0;
 	private _autoCompactionFailureGeneration = 0;
+	private _autoCompactionFailure: { key: string | undefined; error: unknown } | undefined;
 	/** A truncated threshold summary is not retried after every tool in the same user turn. */
 	private _failedThresholdSummaryKey: string | undefined;
 	private _continuationCancellationGeneration = 0;
@@ -623,8 +656,10 @@ export class AgentSession {
 		}
 
 		const summaryKey = this._thresholdSummaryKey();
-		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey)
-			throw new BoundedCompactionError("required compaction previously failed; context remains unsafe");
+		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) {
+			this._assertRequiredCompactionReady(context.messages);
+			return context;
+		}
 
 		const compactionGeneration = this._autoCompactionGeneration;
 		const cancellationGeneration = this._continuationCancellationGeneration;
@@ -668,11 +703,15 @@ export class AgentSession {
 	}
 
 	/** A failed/suppressed required compact is not permission to submit unchanged input. */
-	private _assertRequiredCompactionReady(): void {
-		if (this._requiresCompaction(this.agent.state.messages))
-			throw new BoundedCompactionError(
-				"required compaction did not make context safe; ordinary request not submitted",
-			);
+	private _assertRequiredCompactionReady(messages = this.agent.state.messages): void {
+		if (!this._requiresCompaction(messages)) return;
+		const failure = this._autoCompactionFailure;
+		const cause = failure?.key === this._thresholdSummaryKey() ? failure?.error : undefined;
+		const detail = cause === undefined ? "" : `; cause: ${cause instanceof Error ? cause.message : String(cause)}`;
+		throw new BoundedCompactionError(
+			`required compaction did not make context safe; ordinary request not submitted${detail}`,
+			{ cause },
+		);
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1013,6 +1052,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._disposed = true;
 		if (this._steeringRun) this._steeringRun.accepting = false;
 		this._continuationCancellationGeneration++;
 		this._pendingInLoopCompactionContinuation = false;
@@ -1321,9 +1361,49 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		const expected = options?.expectedSettingsRevision;
+		if (expected !== undefined) {
+			if (!Number.isSafeInteger(expected) || expected < 0) throw new Error("Invalid expectedSettingsRevision");
+			if (expected !== this.settingsRevision) throw new GuardedPromptRefusal("settings_changed");
+			if (!this._runtimeSettingsIdle) throw new GuardedPromptRefusal("busy");
+		}
+		const release = this.beginRuntimeSettingsActivity();
+		const epoch = this._continuationCancellationGeneration;
+		try {
+			await this._prompt(text, options, epoch);
+		} catch (error) {
+			// A hook can propagate a nested guarded refusal after already producing effects.
+			if (expected !== undefined && error instanceof GuardedPromptRefusal)
+				throw new Error("Prompt failed after guarded admission; do not replay this request", { cause: error });
+			throw error;
+		} finally {
+			release();
+		}
+	}
+
+	private async _prompt(text: string, options: PromptOptions | undefined, epoch: number): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
-		const preflightResult = options?.preflightResult;
+		// This validity check also travels through compaction's auth/hooks/preappend awaits.
+		// Unlike the outer idle check, it permits this prompt's own compaction activity.
+		const assertPromptAdmission = () => {
+			if (options?.expectedSettingsRevision === undefined) return;
+			if (options.expectedSettingsRevision !== this.settingsRevision)
+				throw new Error("Settings changed after guarded prompt admission; do not replay this request");
+			if (this._disposed || epoch !== this._continuationCancellationGeneration)
+				throw new Error("Session changed after guarded prompt admission; do not replay this request");
+		};
+		const assertSettings = () => {
+			assertPromptAdmission();
+			if (options?.expectedSettingsRevision === undefined) return;
+			if (this.isStreaming || this.agent.state.isStreaming || this._settingsActivities !== 1 || this.isCompacting)
+				throw new Error("Session changed after guarded prompt admission; do not replay this request");
+		};
+		const preflightResult = (success: boolean) => {
+			if (success) assertSettings();
+			options?.preflightResult?.(success);
+		};
 		let messages: AgentMessage[] | undefined;
+		let pendingNextTurnCount = 0;
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
@@ -1372,6 +1452,7 @@ export class AgentSession {
 
 			// If streaming, queue via steer() or followUp() based on option
 			if (this.isStreaming) {
+				assertSettings();
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -1386,6 +1467,8 @@ export class AgentSession {
 				return;
 			}
 
+			// Hooks may have invalidated admission; do not mutate native preflight state afterward.
+			assertSettings();
 			// Flush any pending bash and custom messages before the new prompt
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
@@ -1398,6 +1481,7 @@ export class AgentSession {
 			const hasConfiguredAuth =
 				this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 				(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+			assertSettings();
 			if (!hasConfiguredAuth) {
 				const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 				if (isOAuth) {
@@ -1415,7 +1499,8 @@ export class AgentSession {
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant) {
 				const failureGeneration = this._autoCompactionFailureGeneration;
-				await this._checkCompaction(lastAssistant, false);
+				await this._checkCompaction(lastAssistant, false, assertPromptAdmission);
+				assertSettings();
 				if (
 					this._autoCompactionFailureGeneration > failureGeneration ||
 					(this._failedThresholdSummaryKey !== undefined &&
@@ -1442,7 +1527,8 @@ export class AgentSession {
 			for (const msg of this._pendingNextTurnMessages) {
 				messages.push(msg);
 			}
-			this._pendingNextTurnMessages = [];
+			pendingNextTurnCount = this._pendingNextTurnMessages.length;
+			if (options?.expectedSettingsRevision === undefined) this._pendingNextTurnMessages = [];
 
 			// Emit before_agent_start extension event
 			const result = await this._extensionRunner.emitBeforeAgentStart(
@@ -1451,6 +1537,7 @@ export class AgentSession {
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
 			);
+			assertSettings();
 			// Add all custom messages from extensions
 			if (result?.messages) {
 				for (const msg of result.messages) {
@@ -1483,7 +1570,10 @@ export class AgentSession {
 			return;
 		}
 
-		preflightResult?.(true);
+		preflightResult(true);
+		assertSettings();
+		if (options?.expectedSettingsRevision !== undefined)
+			this._pendingNextTurnMessages.splice(0, pendingNextTurnCount);
 		await this._runAgentPrompt(messages);
 	}
 
@@ -1890,6 +1980,109 @@ export class AgentSession {
 	// Model Management
 	// =========================================================================
 
+	/** Settings-only admission accounting; never changes waitForIdle or locks extension hooks. */
+	beginRuntimeSettingsActivity(): () => void {
+		this._settingsActivities++;
+		this._settingsActivityEpoch++;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this._settingsActivities--;
+		};
+	}
+
+	private get _runtimeSettingsIdle(): boolean {
+		return (
+			!this._disposed &&
+			this._settingsActivities === 0 &&
+			this.isIdle &&
+			!this.agent.state.isStreaming &&
+			!this.isRetrying &&
+			!this._pendingInLoopCompactionContinuation &&
+			!this.agent.hasQueuedMessages() &&
+			this.pendingMessageCount === 0
+		);
+	}
+
+	/** Ephemeral compare-and-commit token, including ordinary setter and registry refresh changes. */
+	get settingsRevision(): number {
+		const identity = JSON.stringify([this.model, this.thinkingLevel]);
+		if (this._settingsIdentity !== undefined && this._settingsIdentity !== identity)
+			this._settingsRevision = nextSettingsRevision++;
+		this._settingsIdentity = identity;
+		return this._settingsRevision;
+	}
+
+	async setRuntimeSettings(update: RuntimeSettingsUpdate): Promise<RuntimeSettingsResult> {
+		if (!Number.isSafeInteger(update.expectedRevision) || update.expectedRevision < 0)
+			throw new Error("set_runtime_settings requires a nonnegative integer expectedRevision");
+		if (
+			(update.provider === undefined) !== (update.modelId === undefined) ||
+			(update.provider !== undefined &&
+				(typeof update.provider !== "string" ||
+					!update.provider ||
+					typeof update.modelId !== "string" ||
+					!update.modelId))
+		)
+			throw new Error("provider and modelId must both be nonempty strings or both omitted");
+		if (update.thinkingLevel !== undefined && !THINKING_LEVEL_OPTIONS.includes(update.thinkingLevel))
+			throw new Error("Invalid thinkingLevel");
+		if (update.expectedRevision !== this.settingsRevision) return { applied: false, reason: "revision_changed" };
+		if (!this._runtimeSettingsIdle) return { applied: false, reason: "busy" };
+		const epoch = this._settingsActivityEpoch;
+		const cancellation = this._continuationCancellationGeneration;
+		const model =
+			update.provider === undefined
+				? this.model
+				: this._modelRuntime
+						.getAvailableSnapshot()
+						.find((candidate) => candidate.provider === update.provider && candidate.id === update.modelId);
+		if (!model) throw new Error("Model not found");
+		// Authentication is not a lock: ordinary work may proceed while it resolves.
+		let authorized = true;
+		let authError: unknown;
+		try {
+			if (update.provider !== undefined) authorized = !!(await this._modelRuntime.checkAuth(model.provider));
+		} catch (error) {
+			authError = error;
+		}
+		if (
+			this._disposed ||
+			epoch !== this._settingsActivityEpoch ||
+			cancellation !== this._continuationCancellationGeneration
+		)
+			return { applied: false, reason: "busy" };
+		if (update.expectedRevision !== this.settingsRevision) return { applied: false, reason: "revision_changed" };
+		if (!this._runtimeSettingsIdle) return { applied: false, reason: "busy" };
+		if (authError !== undefined) throw authError;
+		if (!authorized) throw new Error(`No API key for ${model.provider}/${model.id}`);
+		const previousModel = this.model;
+		const previousLevel = this.thinkingLevel;
+		const thinkingLevel = clampThinkingLevel(model, update.thinkingLevel ?? previousLevel) as ThinkingLevel;
+		const modelChanged = !modelsAreEqual(previousModel, model);
+		const thinkingChanged = previousLevel !== thinkingLevel;
+		// No await or callback between admission and the pair/revision commit.
+		this.agent.state.model = model;
+		this.agent.state.thinkingLevel = thinkingLevel;
+		const settingsRevision = this.settingsRevision;
+		if (modelChanged) this.sessionManager.appendModelChange(model.provider, model.id);
+		if (thinkingChanged) this.sessionManager.appendThinkingLevelChange(thinkingLevel);
+		const result: RuntimeSettingsResult = {
+			applied: true,
+			settingsRevision,
+			model: { provider: model.provider, id: model.id },
+			thinkingLevel,
+		};
+		// Notify only after the pair is visible; hooks may start work or change settings again.
+		if (thinkingChanged) {
+			this._emit({ type: "thinking_level_changed", level: thinkingLevel });
+			await this._extensionRunner.emit({ type: "thinking_level_select", level: thinkingLevel, previousLevel });
+		}
+		await this._emitModelSelect(model, previousModel, "set");
+		return result;
+	}
+
 	private async _emitModelSelect(
 		nextModel: Model<any>,
 		previousModel: Model<any> | undefined,
@@ -1915,6 +2108,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
+		void this.settingsRevision;
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
 		this.agent.state.model = model;
@@ -1984,6 +2178,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.model, next.thinkingLevel);
 
 		// Apply model
+		void this.settingsRevision;
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		if (options.persist) {
@@ -2019,6 +2214,7 @@ export class AgentSession {
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(nextModel);
+		void this.settingsRevision;
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		if (options.persist) {
@@ -2046,6 +2242,7 @@ export class AgentSession {
 	 * Persists the requested level to global defaults only when options.persist is true.
 	 */
 	setThinkingLevel(level: ThinkingLevel, options: ModelMutationOptions = {}): void {
+		void this.settingsRevision;
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
@@ -2054,6 +2251,7 @@ export class AgentSession {
 		const isChanging = effectiveLevel !== previousLevel;
 
 		this.agent.state.thinkingLevel = effectiveLevel;
+		void this.settingsRevision;
 
 		if (options.persist) {
 			this.settingsManager.setDefaultThinkingLevel(level);
@@ -2271,6 +2469,15 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
+		const release = this.beginRuntimeSettingsActivity();
+		try {
+			return await this._compact(customInstructions);
+		} finally {
+			release();
+		}
+	}
+
+	private async _compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
@@ -2459,7 +2666,12 @@ export class AgentSession {
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		assertPromptAdmission?: () => void,
+	): Promise<boolean> {
+		assertPromptAdmission?.();
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
@@ -2496,7 +2708,7 @@ export class AgentSession {
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				return await this._runAutoCompaction("overflow", false, assertPromptAdmission);
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -2528,7 +2740,7 @@ export class AgentSession {
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this.agent.state.messages = messages.slice(0, -1);
 			}
-			return await this._runAutoCompaction("overflow", willRetry);
+			return await this._runAutoCompaction("overflow", willRetry, assertPromptAdmission);
 		}
 
 		// Case 3: threshold compaction without retry.
@@ -2562,7 +2774,7 @@ export class AgentSession {
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			const summaryKey = this._thresholdSummaryKey();
 			if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) return false;
-			return await this._runAutoCompaction("threshold", false);
+			return await this._runAutoCompaction("threshold", false, assertPromptAdmission);
 		}
 		return false;
 	}
@@ -2577,17 +2789,25 @@ export class AgentSession {
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		assertPromptAdmission?: () => void,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
+		this._autoCompactionFailure = undefined;
+		const release = this.beginRuntimeSettingsActivity();
 		let started = false;
 		let fromExtension = false;
 
 		try {
+			assertPromptAdmission?.();
 			if (!this.model) {
 				return false;
 			}
 
 			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
+			assertPromptAdmission?.();
 
 			const pathEntries = this.sessionManager.getBranch();
 
@@ -2600,6 +2820,7 @@ export class AgentSession {
 			this._emit({ type: "compaction_start", reason });
 			this._autoCompactionAbortController = new AbortController();
 			started = true;
+			assertPromptAdmission?.();
 
 			let extensionCompaction: CompactionResult | undefined;
 
@@ -2613,6 +2834,7 @@ export class AgentSession {
 					willRetry,
 					signal: this._autoCompactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
+				assertPromptAdmission?.();
 
 				if (extensionResult?.cancel) {
 					this._autoCompactionFailureGeneration++;
@@ -2689,6 +2911,7 @@ export class AgentSession {
 				return false;
 			}
 
+			assertPromptAdmission?.();
 			if (!fromExtension) this._assertCompactionSnapshot(compactionSnapshot);
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			this._failedThresholdSummaryKey = undefined;
@@ -2741,6 +2964,7 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			this._autoCompactionFailureGeneration++;
+			this._autoCompactionFailure = { key: this._thresholdSummaryKey(), error };
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
 				this._autoCompactionAbortController?.signal.aborted === true ||
@@ -2779,6 +3003,7 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
+			release();
 			this._resolveIdleWaitIfIdle();
 		}
 	}
@@ -2894,7 +3119,9 @@ export class AgentSession {
 			return;
 		}
 
+		void this.settingsRevision;
 		this.agent.state.model = refreshedModel;
+		void this.settingsRevision;
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
@@ -3171,6 +3398,15 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		const release = this.beginRuntimeSettingsActivity();
+		try {
+			await this._reload(options);
+		} finally {
+			release();
+		}
+	}
+
+	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });

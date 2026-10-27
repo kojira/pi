@@ -21,6 +21,7 @@ import { SUMMARIZATION_SYSTEM_PROMPT, type SummarySource } from "./utils.ts";
 
 // D-COMP-002 resource ceilings, not an authorization to make paid calls.
 const MAX_LEAVES = 32;
+const LEAF_CONCURRENCY = 4;
 const MAX_ATTEMPTS = 64;
 const MAX_JOB_INPUT = 2000000;
 const MAX_JOB_OUTPUT = 524288;
@@ -36,8 +37,8 @@ const ASCII_CHARS_PER_TOKEN = 2.5;
 const CJK_TOKENS_PER_CHAR = 1.5;
 
 export class BoundedCompactionError extends Error {
-	constructor(reason: string) {
-		super(`History preserved; compaction incomplete: ${reason}`);
+	constructor(reason: string, options?: ErrorOptions) {
+		super(`History preserved; compaction incomplete: ${reason}`, options);
 	}
 }
 
@@ -245,7 +246,8 @@ function addUsage(total: Usage | undefined, next: Usage): Usage {
 
 /** Abort even an opaque custom stream that ignores its signal; never adopt its late result. */
 async function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-	signal.throwIfAborted();
+	// Observe the supplied promise even when dispatch synchronously triggered cancellation.
+	if (signal.aborted) return Promise.race([Promise.reject(signal.reason), promise]);
 	let abort = () => {};
 	const cancelled = new Promise<never>((_, reject) => {
 		abort = () => reject(signal.reason);
@@ -464,6 +466,8 @@ export async function generateBoundedSummary(
 						outputReserved + wireOutput > MAX_JOB_OUTPUT
 					)
 						throw new BoundedCompactionError("physical attempt/input/reserved-output budget exhausted");
+					// Shared by all leaf workers: no await between admission and reservation.
+					// Retries reserve again and never refund an already dispatched attempt.
 					attempts++;
 					inputSpent += size.tokens;
 					outputReserved += wireOutput;
@@ -539,11 +543,16 @@ export async function generateBoundedSummary(
 							if (!Number.isFinite(delay) || Date.now() + delay >= deadline)
 								throw new BoundedCompactionError("retry delay exceeds deadline");
 							retryAttempt++;
-							await options.callbacks?.onRetryScheduled?.(
-								retryAttempt,
-								options.retry.maxRetries,
-								delay,
-								message,
+							await untilAborted(
+								Promise.resolve(
+									options.callbacks?.onRetryScheduled?.(
+										retryAttempt,
+										options.retry.maxRetries,
+										delay,
+										message,
+									),
+								),
+								signal,
 							);
 							let backoffTimer: ReturnType<typeof setTimeout> | undefined;
 							try {
@@ -556,7 +565,7 @@ export async function generateBoundedSummary(
 							} finally {
 								clearTimeout(backoffTimer);
 							}
-							await options.callbacks?.onRetryAttemptStart?.();
+							await untilAborted(Promise.resolve(options.callbacks?.onRetryAttemptStart?.()), signal);
 							continue;
 						}
 						throw new Error(`Summarization failed: ${message}`);
@@ -573,21 +582,47 @@ export async function generateBoundedSummary(
 					successful = true;
 					return text;
 				}
+			} catch (error) {
+				controller.abort(error);
+				throw error;
 			} finally {
-				if (retryAttempt > 0) await options.callbacks?.onRetryFinished?.(successful, retryAttempt);
+				if (retryAttempt > 0)
+					await untilAborted(
+						Promise.resolve(options.callbacks?.onRetryFinished?.(successful, retryAttempt)),
+						signal,
+					);
 			}
 		};
-		let nodes: Node[] = [];
-		for (const leaf of leaves) {
-			const first = leaf.owned[0];
-			const last = leaf.owned.at(-1)!;
-			nodes.push({
-				text: await request(leaf),
-				first: { sourceIndex: first.sourceIndex, blockIndex: first.blockIndex, offset: first.start },
-				last: { sourceIndex: last.sourceIndex, blockIndex: last.blockIndex, offset: last.end },
-				depth: 0,
-			});
-		}
+		let nodes: Node[] = new Array(leaves.length);
+		let nextLeaf = 0;
+		const summarizeLeaves = async () => {
+			try {
+				while (nextLeaf < leaves.length) {
+					signal.throwIfAborted();
+					const index = nextLeaf++;
+					const leaf = leaves[index];
+					const first = leaf.owned[0];
+					const last = leaf.owned.at(-1)!;
+					const text = await request(leaf);
+					signal.throwIfAborted();
+					// Completion order must never change chronological merge order.
+					nodes[index] = {
+						text,
+						first: { sourceIndex: first.sourceIndex, blockIndex: first.blockIndex, offset: first.start },
+						last: { sourceIndex: last.sourceIndex, blockIndex: last.blockIndex, offset: last.end },
+						depth: 0,
+					};
+				}
+			} catch (error) {
+				// AbortController retains the first cause, not a sibling's cancellation error.
+				controller.abort(error);
+				throw error;
+			}
+		};
+		// Settle every worker before reduction or returning failure. Opaque providers that
+		// ignore abort remain observed by untilAborted, but cannot install a late result.
+		await Promise.allSettled(Array.from({ length: Math.min(LEAF_CONCURRENCY, leaves.length) }, summarizeLeaves));
+		signal.throwIfAborted();
 		while (nodes.length > 1) {
 			const next: Node[] = [];
 			for (const children of batches(nodes)) {

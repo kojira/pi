@@ -12,7 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { SteeringDeliveryUncertainError } from "../../core/agent-session.ts";
+import { GuardedPromptRefusal, SteeringDeliveryUncertainError } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
@@ -401,16 +401,27 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						images: command.images,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",
+						expectedSettingsRevision: command.expectedSettingsRevision,
 						preflightResult: (didSucceed) => {
 							if (didSucceed) {
 								preflightSucceeded = true;
-								output(success(id, "prompt"));
+								output(
+									success(
+										id,
+										"prompt",
+										command.expectedSettingsRevision === undefined ? undefined : { accepted: true },
+									),
+								);
 							}
 						},
 					})
 					.catch((e) => {
 						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
+							output(
+								e instanceof GuardedPromptRefusal
+									? success(id, "prompt", { accepted: false, reason: e.reason })
+									: error(id, "prompt", e.message),
+							);
 						}
 					});
 				return undefined;
@@ -471,9 +482,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "new_session": {
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await runtimeHost.newSession(options);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "new_session", result);
 			}
 
@@ -495,7 +503,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
-					capabilities: { guardedSteer: 1 },
+					capabilities: { guardedSteer: 1, guardedSettings: 1 },
+					settingsRevision: session.settingsRevision,
 				};
 				return success(id, "get_state", state);
 			}
@@ -503,6 +512,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 			// Model
 			// =================================================================
+
+			case "set_runtime_settings": {
+				return success(id, "set_runtime_settings", await session.setRuntimeSettings(command));
+			}
 
 			case "set_model": {
 				const models = session.modelRuntime.getAvailableSnapshot();
@@ -639,17 +652,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "switch_session": {
 				const result = await runtimeHost.switchSession(command.sessionPath);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "switch_session", result);
 			}
 
 			case "fork": {
 				const result = await runtimeHost.fork(command.entryId);
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
 			}
 
@@ -659,9 +666,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}
 				const result = await runtimeHost.fork(leafId, { position: "at" });
-				if (!result.cancelled) {
-					await rebindSession();
-				}
 				return success(id, "clone", { cancelled: result.cancelled });
 			}
 

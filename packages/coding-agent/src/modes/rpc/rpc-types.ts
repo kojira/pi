@@ -7,7 +7,13 @@
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { GuardedSteerResult, SessionStats } from "../../core/agent-session.ts";
+import type {
+	GuardedPromptResult,
+	GuardedSteerResult,
+	RuntimeSettingsResult,
+	RuntimeSettingsUpdate,
+	SessionStats,
+} from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
@@ -19,7 +25,14 @@ import type { SourceInfo } from "../../core/source-info.ts";
 
 export type RpcCommand =
 	// Prompting
-	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
+	| {
+			id?: string;
+			type: "prompt";
+			message: string;
+			images?: ImageContent[];
+			streamingBehavior?: "steer" | "followUp";
+			expectedSettingsRevision?: number;
+	  }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[]; expectedRunId?: string }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
@@ -30,6 +43,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 
 	// Model
+	| ({ id?: string; type: "set_runtime_settings" } & RuntimeSettingsUpdate)
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
@@ -106,7 +120,8 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
-	capabilities: { guardedSteer: 1 };
+	capabilities: { guardedSteer: 1; guardedSettings: 1 };
+	settingsRevision: number;
 }
 
 // ============================================================================
@@ -116,7 +131,7 @@ export interface RpcSessionState {
 // Success responses with data
 export type RpcResponse =
 	// Prompting (async - events follow)
-	| { id?: string; type: "response"; command: "prompt"; success: true }
+	| { id?: string; type: "response"; command: "prompt"; success: true; data?: GuardedPromptResult }
 	| { id?: string; type: "response"; command: "steer"; success: true; data?: GuardedSteerResult }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
@@ -133,6 +148,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
 
 	// Model
+	| { id?: string; type: "response"; command: "set_runtime_settings"; success: true; data: RuntimeSettingsResult }
 	| {
 			id?: string;
 			type: "response";

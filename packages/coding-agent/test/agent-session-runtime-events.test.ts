@@ -156,6 +156,59 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		]);
 	});
 
+	it("keeps settings admission busy across old-session hooks and new-session setup/rebind", async () => {
+		let releaseBefore!: () => void;
+		let enteredBefore!: () => void;
+		const before = new Promise<void>((resolve) => {
+			enteredBefore = resolve;
+		});
+		const holdBefore = new Promise<void>((resolve) => {
+			releaseBefore = resolve;
+		});
+		let releaseSetup!: () => void;
+		let enteredSetup!: () => void;
+		const setup = new Promise<void>((resolve) => {
+			enteredSetup = resolve;
+		});
+		const holdSetup = new Promise<void>((resolve) => {
+			releaseSetup = resolve;
+		});
+		const { runtimeHost } = await createRuntimeHost((pi) => {
+			pi.on("session_before_switch", async () => {
+				enteredBefore();
+				await holdBefore;
+			});
+		});
+		const oldSession = runtimeHost.session;
+		const revision = oldSession.settingsRevision;
+		const replacement = runtimeHost.newSession({
+			setup: async () => {
+				enteredSetup();
+				await holdSetup;
+			},
+		});
+		await before;
+		expect(await oldSession.setRuntimeSettings({ expectedRevision: revision })).toEqual({
+			applied: false,
+			reason: "busy",
+		});
+		releaseBefore();
+		await setup;
+		expect(runtimeHost.session).not.toBe(oldSession);
+		expect(runtimeHost.session.settingsRevision).toBeGreaterThan(revision);
+		expect(
+			await runtimeHost.session.setRuntimeSettings({ expectedRevision: runtimeHost.session.settingsRevision }),
+		).toEqual({ applied: false, reason: "busy" });
+		await expect(
+			runtimeHost.session.prompt("old revision", { expectedSettingsRevision: revision }),
+		).rejects.toMatchObject({ reason: "settings_changed" });
+		releaseSetup();
+		await replacement;
+		expect(
+			await runtimeHost.session.setRuntimeSettings({ expectedRevision: runtimeHost.session.settingsRevision }),
+		).toMatchObject({ applied: true });
+	});
+
 	it("honors session_before_switch cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];
 		const { runtimeHost } = await createRuntimeHost((pi) => {
