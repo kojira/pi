@@ -1,9 +1,11 @@
 import type { EventEmitter } from "node:events";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, expect, it, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { AgentSessionRuntime, createAgentSessionFromServices } from "../src/core/agent-session-runtime.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./suite/harness.ts";
 import { workResponse } from "./suite/work-response.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 const io = vi.hoisted(() => ({
 	line: undefined as ((line: string) => void) | undefined,
@@ -34,17 +36,49 @@ afterEach(() => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
 	io.outputs = [];
 	io.replies.clear();
+	vi.restoreAllMocks();
 });
 
 async function setup(options: HarnessOptions = {}) {
 	const h: Harness = await createHarness({
+		persistent: true,
 		models: [
-			{ id: "first", reasoning: true },
+			{ id: "first", reasoning: true, contextWindow: 200000, maxTokens: 32000 },
 			{ id: "second", reasoning: true },
 		],
 		settings: { compaction: { enabled: false }, retry: { enabled: false } },
 		...options,
 	});
+	const services = {
+		cwd: h.tempDir,
+		agentDir: h.tempDir,
+		modelRuntime: h.session.modelRuntime,
+		settingsManager: h.settingsManager,
+		resourceLoader: h.session.resourceLoader,
+		diagnostics: [],
+	};
+	const runtimeHost = new AgentSessionRuntime(
+		h.session,
+		services,
+		async ({ cwd, sessionManager, sessionStartEvent }) => {
+			const extensionsResult = await createTestExtensionsResult(options.extensionFactories ?? [], cwd);
+			const replacementServices = {
+				...services,
+				cwd,
+				resourceLoader: createTestResourceLoader({ extensionsResult }),
+			};
+			return {
+				...(await createAgentSessionFromServices({
+					services: replacementServices,
+					sessionManager,
+					sessionStartEvent,
+					model: h.getModel(),
+				})),
+				services: replacementServices,
+				diagnostics: [],
+			};
+		},
+	);
 	const targets: { emitter: EventEmitter; name: string }[] = [
 		{ emitter: process, name: "SIGTERM" },
 		{ emitter: process, name: "SIGHUP" },
@@ -52,6 +86,7 @@ async function setup(options: HarnessOptions = {}) {
 	];
 	const listeners = targets.map(({ emitter, name }) => ({ emitter, name, before: emitter.listeners(name) }));
 	cleanups.push(() => {
+		runtimeHost.session.dispose();
 		h.cleanup();
 		for (const { emitter, name, before } of listeners)
 			for (const listener of emitter.listeners(name))
@@ -60,7 +95,7 @@ async function setup(options: HarnessOptions = {}) {
 	const ready = new Promise<void>((resolve) => {
 		io.ready = resolve;
 	});
-	void runRpcMode({ session: h.session, setRebindSession: () => {} } as unknown as AgentSessionRuntime);
+	void runRpcMode(runtimeHost);
 	await ready;
 	let sequence = 0;
 	const command = (value: object) =>
@@ -69,7 +104,24 @@ async function setup(options: HarnessOptions = {}) {
 			io.replies.set(id, resolve);
 			io.line!(JSON.stringify({ ...value, id }));
 		});
-	return { h, command };
+	return { h, command, runtimeHost };
+}
+
+const checkpoint =
+	"## Goal\nContinue.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\nFixture.\n### In Progress\nTask.\n### Blocked\nNone.\n## Key Decisions\nKeep order.\n## Next Steps\nContinue.\n## Critical Context\nReferences.";
+
+function seedUnsafeHistory(h: Harness) {
+	h.settingsManager.applyOverrides({ compaction: { enabled: true, keepRecentTokens: 1 } });
+	h.sessionManager.appendMessage({ role: "user", content: "a".repeat(360000), timestamp: Date.now() - 1000 });
+	const assistant = fauxAssistantMessage("retained");
+	h.sessionManager.appendMessage({
+		...assistant,
+		provider: h.getModel().provider,
+		model: h.getModel().id,
+		usage: { ...assistant.usage, input: 190000, totalTokens: 190000 },
+	});
+	h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+	h.setResponses([fauxAssistantMessage(checkpoint)]);
 }
 
 it("advertises and implements the frozen guarded settings and prompt wire contract", async () => {
@@ -153,9 +205,13 @@ it.each(["setter", "abort"] as const)(
 			],
 		});
 		effect = () => {
-			if (mutation === "setter") h.session.setThinkingLevel("high");
-			else return h.session.abort();
+			if (mutation === "setter") {
+				// Return to off so the faux adapter needs no reasoning expansion; revision still changes.
+				h.session.setThinkingLevel("high");
+				h.session.setThinkingLevel("off");
+			} else return h.session.abort();
 		};
+		seedUnsafeHistory(h);
 		const before = h.sessionManager.getEntries().length;
 		const response = await command({
 			type: "prompt",
@@ -168,6 +224,7 @@ it.each(["setter", "abort"] as const)(
 		});
 		expect(response).not.toHaveProperty("data");
 		expect(effects).toBe(1);
+		expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 		expect(h.faux.state.callCount).toBe(0);
 		expect(
 			h.sessionManager
@@ -176,6 +233,104 @@ it.each(["setter", "abort"] as const)(
 				.filter((e) => e.type === "message"),
 		).toHaveLength(0);
 		expect(io.outputs.filter((record) => record.type === "response" && record.id === response.id)).toHaveLength(1);
+	},
+);
+
+it("reports abort during compaction auth once without dispatch, checkpoint or retryable refusal", async () => {
+	const { h, command } = await setup();
+	seedUnsafeHistory(h);
+	let release!: () => void;
+	let entered!: () => void;
+	const hold = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const began = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const auth = await h.session.modelRuntime.getAuth(h.getModel());
+	vi.spyOn(h.session.modelRuntime, "getAuth").mockImplementation(async () => {
+		entered();
+		await hold;
+		return auth;
+	});
+	const prompt = command({ type: "prompt", message: "guarded", expectedSettingsRevision: h.session.settingsRevision });
+	await began;
+	try {
+		expect(await command({ type: "abort" })).toMatchObject({ success: true });
+	} finally {
+		release();
+	}
+	const response = await prompt;
+	expect(response).toMatchObject({ success: false, error: expect.stringContaining("after guarded prompt admission") });
+	expect(response).not.toHaveProperty("data");
+	expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	expect(h.faux.state.callCount).toBe(0);
+	expect(io.outputs.filter((record) => record.type === "response" && record.id === response.id)).toHaveLength(1);
+});
+
+it.each(["new_session", "switch_session", "fork", "clone"] as const)(
+	"keeps actual RPC %s startup hooks busy and binds the replacement only once",
+	async (type) => {
+		let release!: () => void;
+		let entered!: () => void;
+		const hold = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const began = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let probe = async () => {};
+		let starts = 0;
+		const refusals: Record<string, unknown>[] = [];
+		const { h, command, runtimeHost } = await setup({
+			persistent: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", async (event) => {
+						if (event.reason === "startup") return;
+						starts++;
+						await probe();
+						entered();
+						await hold;
+					});
+				},
+			],
+		});
+		const entryId = h.sessionManager.appendMessage({ role: "user", content: "history", timestamp: Date.now() });
+		h.sessionManager.appendMessage(fauxAssistantMessage("saved"));
+		h.setResponses([(context) => workResponse("must not run during replacement", context)]);
+		probe = async () => {
+			const state = await command({ type: "get_state" });
+			const { settingsRevision } = state.data as { settingsRevision: number };
+			refusals.push(
+				await command({ type: "set_runtime_settings", expectedRevision: settingsRevision, thinkingLevel: "high" }),
+			);
+			refusals.push(
+				await command({ type: "prompt", expectedSettingsRevision: settingsRevision, message: "not admitted" }),
+			);
+		};
+		const replacement = command({ type, entryId, sessionPath: h.session.sessionFile });
+		await began;
+		try {
+			expect(refusals).toMatchObject([
+				{ success: true, data: { applied: false, reason: "busy" } },
+				{ success: true, data: { accepted: false, reason: "busy" } },
+			]);
+		} finally {
+			release();
+		}
+		expect(await replacement).toMatchObject({ success: true, data: { cancelled: false } });
+		await runtimeHost.session.waitForIdle();
+		for (const response of refusals) expect(response).toMatchObject({ success: true, data: { reason: "busy" } });
+		expect(starts).toBe(1);
+		expect(h.faux.state.callCount).toBe(0);
+		expect(
+			await command({
+				type: "set_runtime_settings",
+				expectedRevision: runtimeHost.session.settingsRevision,
+				thinkingLevel: "high",
+			}),
+		).toMatchObject({ success: true, data: { applied: true } });
 	},
 );
 

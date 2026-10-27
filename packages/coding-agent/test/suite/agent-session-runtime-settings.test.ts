@@ -4,6 +4,22 @@ import { GuardedPromptRefusal } from "../../src/core/agent-session.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
 import { workResponse } from "./work-response.ts";
 
+const checkpoint =
+	"## Goal\nContinue.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\nFixture.\n### In Progress\nTask.\n### Blocked\nNone.\n## Key Decisions\nKeep order.\n## Next Steps\nContinue.\n## Critical Context\nReferences.";
+
+function seedUnsafeHistory(h: Harness) {
+	h.settingsManager.applyOverrides({ compaction: { enabled: true, keepRecentTokens: 1 } });
+	h.sessionManager.appendMessage({ role: "user", content: "a".repeat(360000), timestamp: Date.now() - 1000 });
+	const assistant = fauxAssistantMessage("retained");
+	h.sessionManager.appendMessage({
+		...assistant,
+		provider: h.getModel().provider,
+		model: h.getModel().id,
+		usage: { ...assistant.usage, input: 190000, totalTokens: 190000 },
+	});
+	h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+}
+
 function deferred() {
 	let resolve!: () => void;
 	const promise = new Promise<void>((done) => {
@@ -21,8 +37,9 @@ describe("AgentSession guarded runtime settings", () => {
 	});
 	async function setup(options: HarnessOptions = {}) {
 		const h = await createHarness({
+			persistent: true,
 			models: [
-				{ id: "first", reasoning: true },
+				{ id: "first", reasoning: true, contextWindow: 200000, maxTokens: 32000 },
 				{ id: "second", reasoning: true },
 			],
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
@@ -248,19 +265,30 @@ describe("AgentSession guarded runtime settings", () => {
 					(pi) => {
 						const changeSettings = () => {
 							calls++;
+							// ABA still invalidates admission, without requiring faux reasoning expansion.
 							pi.setThinkingLevel("high");
+							pi.setThinkingLevel("off");
 						};
 						if (event === "input") pi.on("input", changeSettings);
-						else pi.on("before_agent_start", changeSettings);
+						else
+							pi.on("before_agent_start", () => {
+								changeSettings();
+								return { systemPrompt: "must not install after invalidation" };
+							});
 					},
 				],
 			});
+			if (event === "input") seedUnsafeHistory(h);
+			h.setResponses([fauxAssistantMessage(checkpoint)]);
 			const before = h.sessionManager.getEntries();
+			const systemPrompt = h.session.systemPrompt;
 			const revision = h.session.settingsRevision;
 			await expect(h.session.prompt("effectful", { expectedSettingsRevision: revision })).rejects.toThrow(
 				/after guarded prompt admission/,
 			);
 			expect(calls).toBe(1);
+			expect(h.session.systemPrompt).toBe(systemPrompt);
+			expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 			expect(h.faux.state.callCount).toBe(0);
 			expect(h.sessionManager.getEntries().filter((e) => e.type === "message")).toEqual(
 				before.filter((e) => e.type === "message"),
@@ -271,6 +299,100 @@ describe("AgentSession guarded runtime settings", () => {
 			expect(calls).toBe(1);
 		},
 	);
+
+	it.each(["abort", "revision", "dispose"] as const)(
+		"invalidates guarded preflight during compaction auth on %s without dispatch or checkpoint",
+		async (mutation) => {
+			const h = await setup();
+			seedUnsafeHistory(h);
+			h.setResponses([fauxAssistantMessage(checkpoint)]);
+			const gate = deferred();
+			const began = deferred();
+			const auth = await h.session.modelRuntime.getAuth(h.getModel());
+			vi.spyOn(h.session.modelRuntime, "getAuth").mockImplementation(async () => {
+				began.resolve();
+				await gate.promise;
+				return auth;
+			});
+			const pending = h.session
+				.prompt("guarded", { expectedSettingsRevision: h.session.settingsRevision })
+				.catch((error: unknown) => error);
+			await began.promise;
+			if (mutation === "abort") await h.session.abort();
+			if (mutation === "revision") {
+				h.session.setThinkingLevel("high");
+				h.session.setThinkingLevel("off");
+			}
+			if (mutation === "dispose") h.session.dispose();
+			gate.resolve();
+			const error = await pending;
+			expect(error).toBeInstanceOf(Error);
+			expect(error).not.toBeInstanceOf(GuardedPromptRefusal);
+			expect(error).toMatchObject({ message: expect.stringContaining("after guarded prompt admission") });
+			expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+			expect(h.faux.state.callCount).toBe(0);
+			if (mutation !== "dispose")
+				expect(await h.session.setRuntimeSettings({ expectedRevision: h.session.settingsRevision })).toMatchObject({
+					applied: true,
+				});
+		},
+	);
+
+	it.each(["default", "extension"] as const)(
+		"rechecks guarded validity before appending a %s compaction result",
+		async (source) => {
+			const gate = deferred();
+			const began = deferred();
+			const h = await setup({
+				extensionFactories:
+					source === "extension"
+						? [
+								(pi) => {
+									pi.on("session_before_compact", async ({ preparation }) => {
+										began.resolve();
+										await gate.promise;
+										return {
+											compaction: {
+												summary: checkpoint,
+												firstKeptEntryId: preparation.firstKeptEntryId,
+												tokensBefore: preparation.tokensBefore,
+											},
+										};
+									});
+								},
+							]
+						: [],
+			});
+			seedUnsafeHistory(h);
+			h.setResponses([
+				async () => {
+					began.resolve();
+					await gate.promise;
+					return fauxAssistantMessage(checkpoint);
+				},
+			]);
+			const pending = h.session
+				.prompt("guarded", { expectedSettingsRevision: h.session.settingsRevision })
+				.catch((error: unknown) => error);
+			await began.promise;
+			const previous = h.session.thinkingLevel;
+			h.session.setThinkingLevel("high");
+			h.session.setThinkingLevel(previous);
+			gate.resolve();
+			expect(await pending).toMatchObject({ message: expect.stringContaining("after guarded prompt admission") });
+			expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+			expect(h.faux.state.callCount).toBe(source === "default" ? 1 : 0);
+		},
+	);
+
+	it("allows valid guarded preflight to compact once and submit the ordinary request", async () => {
+		const h = await setup();
+		seedUnsafeHistory(h);
+		h.setResponses([fauxAssistantMessage(checkpoint), (context) => workResponse("safe next request", context)]);
+		await h.session.prompt("continue", { expectedSettingsRevision: h.session.settingsRevision });
+		expect(h.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(h.faux.state.callCount).toBe(2);
+	});
 
 	it("rejects stale revisions across session replacement and before any input hook", async () => {
 		const original = await setup();

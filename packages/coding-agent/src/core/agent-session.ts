@@ -1383,18 +1383,19 @@ export class AgentSession {
 
 	private async _prompt(text: string, options: PromptOptions | undefined, epoch: number): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
-		const assertSettings = () => {
+		// This validity check also travels through compaction's auth/hooks/preappend awaits.
+		// Unlike the outer idle check, it permits this prompt's own compaction activity.
+		const assertPromptAdmission = () => {
 			if (options?.expectedSettingsRevision === undefined) return;
 			if (options.expectedSettingsRevision !== this.settingsRevision)
 				throw new Error("Settings changed after guarded prompt admission; do not replay this request");
-			if (
-				this._disposed ||
-				epoch !== this._continuationCancellationGeneration ||
-				this.isStreaming ||
-				this.agent.state.isStreaming ||
-				this._settingsActivities !== 1 ||
-				this.isCompacting
-			)
+			if (this._disposed || epoch !== this._continuationCancellationGeneration)
+				throw new Error("Session changed after guarded prompt admission; do not replay this request");
+		};
+		const assertSettings = () => {
+			assertPromptAdmission();
+			if (options?.expectedSettingsRevision === undefined) return;
+			if (this.isStreaming || this.agent.state.isStreaming || this._settingsActivities !== 1 || this.isCompacting)
 				throw new Error("Session changed after guarded prompt admission; do not replay this request");
 		};
 		const preflightResult = (success: boolean) => {
@@ -1466,6 +1467,8 @@ export class AgentSession {
 				return;
 			}
 
+			// Hooks may have invalidated admission; do not mutate native preflight state afterward.
+			assertSettings();
 			// Flush any pending bash and custom messages before the new prompt
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
@@ -1478,6 +1481,7 @@ export class AgentSession {
 			const hasConfiguredAuth =
 				this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 				(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+			assertSettings();
 			if (!hasConfiguredAuth) {
 				const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 				if (isOAuth) {
@@ -1495,7 +1499,8 @@ export class AgentSession {
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant) {
 				const failureGeneration = this._autoCompactionFailureGeneration;
-				await this._checkCompaction(lastAssistant, false);
+				await this._checkCompaction(lastAssistant, false, assertPromptAdmission);
+				assertSettings();
 				if (
 					this._autoCompactionFailureGeneration > failureGeneration ||
 					(this._failedThresholdSummaryKey !== undefined &&
@@ -1532,6 +1537,7 @@ export class AgentSession {
 				this._baseSystemPrompt,
 				this._baseSystemPromptOptions,
 			);
+			assertSettings();
 			// Add all custom messages from extensions
 			if (result?.messages) {
 				for (const msg of result.messages) {
@@ -2660,7 +2666,12 @@ export class AgentSession {
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		assertPromptAdmission?: () => void,
+	): Promise<boolean> {
+		assertPromptAdmission?.();
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
@@ -2697,7 +2708,7 @@ export class AgentSession {
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				return await this._runAutoCompaction("overflow", false, assertPromptAdmission);
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -2729,7 +2740,7 @@ export class AgentSession {
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this.agent.state.messages = messages.slice(0, -1);
 			}
-			return await this._runAutoCompaction("overflow", willRetry);
+			return await this._runAutoCompaction("overflow", willRetry, assertPromptAdmission);
 		}
 
 		// Case 3: threshold compaction without retry.
@@ -2763,7 +2774,7 @@ export class AgentSession {
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			const summaryKey = this._thresholdSummaryKey();
 			if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) return false;
-			return await this._runAutoCompaction("threshold", false);
+			return await this._runAutoCompaction("threshold", false, assertPromptAdmission);
 		}
 		return false;
 	}
@@ -2778,7 +2789,11 @@ export class AgentSession {
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		assertPromptAdmission?: () => void,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		this._autoCompactionFailure = undefined;
 		const release = this.beginRuntimeSettingsActivity();
@@ -2786,11 +2801,13 @@ export class AgentSession {
 		let fromExtension = false;
 
 		try {
+			assertPromptAdmission?.();
 			if (!this.model) {
 				return false;
 			}
 
 			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
+			assertPromptAdmission?.();
 
 			const pathEntries = this.sessionManager.getBranch();
 
@@ -2803,6 +2820,7 @@ export class AgentSession {
 			this._emit({ type: "compaction_start", reason });
 			this._autoCompactionAbortController = new AbortController();
 			started = true;
+			assertPromptAdmission?.();
 
 			let extensionCompaction: CompactionResult | undefined;
 
@@ -2816,6 +2834,7 @@ export class AgentSession {
 					willRetry,
 					signal: this._autoCompactionAbortController.signal,
 				})) as SessionBeforeCompactResult | undefined;
+				assertPromptAdmission?.();
 
 				if (extensionResult?.cancel) {
 					this._autoCompactionFailureGeneration++;
@@ -2892,6 +2911,7 @@ export class AgentSession {
 				return false;
 			}
 
+			assertPromptAdmission?.();
 			if (!fromExtension) this._assertCompactionSnapshot(compactionSnapshot);
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			this._failedThresholdSummaryKey = undefined;
