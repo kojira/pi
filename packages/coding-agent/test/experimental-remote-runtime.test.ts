@@ -1,5 +1,6 @@
 import { lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { type Context, createFacetHost, defineFacet, defineService } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -589,38 +590,114 @@ describe("experimental durable server composition", () => {
 		await expect(services.dispose(BACKGROUND_CONTEXT)).resolves.toBeUndefined();
 	});
 
-	test("streams prompt events through the worker-owned service provider", async ({ onTestFinished }) => {
-		const spawn = vi
-			.spyOn(processRuntime, "spawnInternalProcess")
-			.mockImplementation((role, args, options) =>
-				realSpawnInternalProcess(
-					role,
-					args,
-					role === "session-worker" ? { ...options, entryUrl: fauxWorkerEntryUrl } : options,
-				),
-			);
-		onTestFinished(() => spawn.mockRestore());
-		const { directory } = await makeServer();
-		const eventTypes: string[] = [];
+	test.for(["rpc-first", "events-first", "callback-error", "disconnect"] as const)(
+		"streams prompt events through the worker-owned service provider (%s)",
+		async (order, { onTestFinished }) => {
+			const spawn = vi
+				.spyOn(processRuntime, "spawnInternalProcess")
+				.mockImplementation((role, args, options) =>
+					realSpawnInternalProcess(
+						role,
+						args,
+						role === "session-worker" ? { ...options, entryUrl: fauxWorkerEntryUrl } : options,
+					),
+				);
+			onTestFinished(() => spawn.mockRestore());
+			const { directory } = await makeServer();
+			const eventTypes: string[] = [];
+			const transcriptGate = deferred();
+			const promptReturned = deferred();
+			const terminalDelivered = deferred();
+			let promptClient: Client | undefined;
+			if (order === "events-first" || order === "callback-error") transcriptGate.resolve();
+			const subscribeService = Client.prototype.subscribeService;
+			const subscribe = vi.spyOn(Client.prototype, "subscribeService").mockImplementation(function (
+				this: Client,
+				target,
+				serviceId,
+				mode,
+				listener,
+				signal,
+			) {
+				return subscribeService.call(
+					this,
+					target,
+					serviceId,
+					mode,
+					async (update) => {
+						if (serviceId === Transcript.id) await transcriptGate.promise;
+						await listener(update);
+					},
+					signal,
+				);
+			});
+			const request = Client.prototype.request;
+			const invoke = vi.spyOn(Client.prototype, "request").mockImplementation(async function (
+				this: Client,
+				target,
+				call,
+				signal,
+			) {
+				const result = await request.call(this, target, call, signal);
+				if (call.serviceId === AgentController.id && call.member === "prompt") {
+					promptClient = this;
+					if (order === "events-first") await terminalDelivered.promise;
+					promptReturned.resolve();
+				}
+				return result;
+			});
+			onTestFinished(() => {
+				transcriptGate.resolve();
+				subscribe.mockRestore();
+				invoke.mockRestore();
+			});
 
-		const result = await runClient(
-			{ command: "client", sessionId: "demo-1", prompt: "question" },
-			{
-				directory,
-				onEvent(event) {
-					eventTypes.push(event.type);
+			const pending = runClient(
+				{ command: "client", sessionId: "demo-1", prompt: "question" },
+				{
+					directory,
+					async onEvent(event) {
+						await setImmediate();
+						if (order === "callback-error") throw new Error("event callback failed");
+						eventTypes.push(event.type);
+						if (event.type === "run_end") terminalDelivered.resolve();
+					},
 				},
-			},
-		);
+			);
+			const failure =
+				order === "callback-error" || order === "disconnect"
+					? expect(pending).rejects.toThrow(
+							order === "callback-error"
+								? "event callback failed"
+								: "Session attachment changed during prompt delivery",
+						)
+					: undefined;
 
-		expect(result).toMatchObject({ kind: "prompted", text: "deterministic remote answer" });
-		// The prompt RPC may resolve before the terminal run_end state is replicated.
-		// This client closes its event subscription on RPC completion; the next test
-		// checks terminal state via the durable service instead.
-		expect(eventTypes).toEqual(
-			expect.arrayContaining(["run_start", "message_start", "message_update", "message_end", "entry_added"]),
-		);
-	});
+			// Force either ordering with gates, not timing sleeps. The RPC alone must
+			// never close the transcript subscription before queued events arrive.
+			await promptReturned.promise;
+			await setImmediate();
+			if (order === "rpc-first" || order === "disconnect") expect(eventTypes).toEqual([]);
+			if (order === "disconnect") promptClient!.disconnect("test disconnect after RPC");
+			transcriptGate.resolve();
+			if (failure !== undefined) {
+				await failure;
+				return;
+			}
+			const result = await pending;
+			expect(result).toMatchObject({ kind: "prompted", text: "deterministic remote answer" });
+			expect(eventTypes).toEqual(
+				expect.arrayContaining([
+					"run_start",
+					"message_start",
+					"message_update",
+					"message_end",
+					"entry_added",
+					"run_end",
+				]),
+			);
+		},
+	);
 
 	test("replicates terminal operation state after consecutive prompts", async ({ onTestFinished }) => {
 		const spawn = vi
@@ -812,6 +889,14 @@ describe("experimental durable server composition", () => {
 		});
 	});
 });
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+}
 
 async function pathExists(path: string): Promise<boolean> {
 	try {

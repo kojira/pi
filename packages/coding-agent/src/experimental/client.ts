@@ -80,7 +80,20 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 		}
 
 		const agent = match.agent;
+		if (match.transcript.state.value?.snapshot === null || match.transcript.state.value?.snapshot === undefined) {
+			throw new Error("Transcript has no initialized snapshot");
+		}
 		const completedText = new Map<string, string>();
+		const observedRuns = new Set<string>();
+		let resolveDelivered!: () => void;
+		let rejectDelivered!: (error: unknown) => void;
+		const delivered = new Promise<void>((resolve, reject) => {
+			resolveDelivered = resolve;
+			rejectDelivered = reject;
+		});
+		// Delivery can fail before the prompt RPC returns. Observe that rejection immediately.
+		void delivered.catch(() => {});
+		let operationId: string | undefined;
 		let deliveryTail = Promise.resolve();
 		const unsubscribe = match.transcript.state.subscribe((value, _context, delivery) => {
 			if (delivery.kind !== "update" || value.event === null) return;
@@ -90,21 +103,35 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 					completedText.set(event.runId, messageText(event.message));
 				}
 				await options.onEvent?.(event);
+				if (event.type === "run_end" || event.type === "run_suspend") {
+					observedRuns.add(event.runId);
+					if (event.runId === operationId) resolveDelivered();
+				}
 			});
+			void deliveryTail.catch(rejectDelivered);
 		});
-		if (match.transcript.state.value?.snapshot === null || match.transcript.state.value?.snapshot === undefined) {
-			unsubscribe();
-			throw new Error("Transcript has no initialized snapshot");
-		}
+		const removeConnectionListener = match.client.onConnectionStateChange((change) => {
+			if (change.state !== "connected") rejectDelivered(new Error("Connection lost during prompt delivery"));
+		});
+		const removeAttachmentListener = match.client.onAttachmentChange(() => {
+			rejectDelivered(new Error("Session attachment changed during prompt delivery"));
+		});
 		let response: AgentOperationResponse;
 		try {
 			response = await agent.prompt({ message: command.prompt, images: null }, BACKGROUND_CONTEXT);
+			if (!response.accepted) throw new Error(response.error.message);
+			if (response.error !== null) throw new Error(response.error.message);
+			operationId = response.operationId;
+			// RPC completion and transcript replication are independent streams. Keep the
+			// subscription until this run's terminal (or suspended) event and callbacks drain.
+			if (observedRuns.has(operationId)) resolveDelivered();
+			await delivered;
 		} finally {
 			unsubscribe();
+			removeConnectionListener();
+			removeAttachmentListener();
 			await deliveryTail;
 		}
-		if (!response.accepted) throw new Error(response.error.message);
-		if (response.error !== null) throw new Error(response.error.message);
 		return {
 			kind: "prompted",
 			serverId: match.route.serverId,
