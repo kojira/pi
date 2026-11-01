@@ -47,4 +47,16 @@ auditConfig:
     # zod ^3, where the 4.x patch does not apply; drop this once it ships a
     # zod 4 release.
     - GHSA-mrhx-c7xc-m3w5
+    # minimatch <11.0.1 (coding-agent): the vulnerable path needs
+    # optimizationLevel >= 2, which is never set; patterns come from local user
+    # config. The fix (11.0.1) is still inside the minimum release age window.
+    # TODO: remove once minimatch is bumped to >=11.0.1 (on/after 2026-11-04 UTC).
+    - GHSA-g3hv-75wg-m249
 
+allowBuilds:
+  '@google/genai': set this to true or false
+  canvas: set this to true or false
+  cpu-features: set this to true or false
+  esbuild: set this to true or false
+  protobufjs: set this to true or false
+  ssh2: set this to true or false
