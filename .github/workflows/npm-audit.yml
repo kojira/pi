@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '37 7 * * *'
   workflow_dispatch:
+    inputs:
+      notify_test:
+        description: 'Send a Discord test notice for this run regardless of outcome'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -28,3 +34,22 @@ jobs:
 
       - name: Audit production vulnerabilities
         run: pnpm audit --prod --audit-level moderate
+
+      - name: Notify Discord
+        if: ${{ !cancelled() && ((failure() && github.event_name == 'schedule') || (github.event_name == 'workflow_dispatch' && inputs.notify_test)) }}
+        env:
+          DISCORD_CI_WEBHOOK_URL: ${{ secrets.DISCORD_CI_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          TEST_PREFIX: ${{ github.event_name == 'workflow_dispatch' && '[test] ' || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DISCORD_CI_WEBHOOK_URL" ]; then
+            echo "DISCORD_CI_WEBHOOK_URL is not set; skipping Discord notification."
+            exit 0
+          fi
+          content="${TEST_PREFIX}CI ${JOB_STATUS}: $GITHUB_REPOSITORY / $GITHUB_WORKFLOW ($GITHUB_EVENT_NAME)
+          Ref: $GITHUB_REF_NAME @ ${GITHUB_SHA:0:12}
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --arg content "$content" '{content: $content, allowed_mentions: {parse: []}}' \
+            | curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @- "$DISCORD_CI_WEBHOOK_URL" >/dev/null
+          echo "Discord notification sent."
