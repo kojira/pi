@@ -244,6 +244,7 @@ export {
 	buildContextEntries,
 	buildSessionContext,
 	type CompactionEntry,
+	type CreateBranchedSessionOptions,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,

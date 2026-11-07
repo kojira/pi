@@ -43,6 +43,16 @@ export interface NewSessionOptions {
 	parentSession?: string;
 }
 
+export interface CreateBranchedSessionOptions {
+	/**
+	 * Keep only what the LLM currently sees on a compacted branch: the latest compaction, its kept
+	 * entries, and everything after it, plus the latest pre-cut state entries (thinking level, model,
+	 * session name, and the newest custom entry per customType). Branches without a compaction are
+	 * copied in full. The parentSession header still points at the full history.
+	 */
+	contextOnly?: boolean;
+}
+
 export interface SessionEntryBase {
 	type: string;
 	id: string;
@@ -357,6 +367,49 @@ function buildSessionPath(
 	}
 	path.reverse();
 	return path;
+}
+
+/**
+ * Reduce a root-to-leaf path to the entries a context-only fork needs. The tail starts where
+ * buildContextEntries() starts reading, so the fork projects the same LLM messages; the carried
+ * pre-cut entries restore the same thinking level, model, session name, and per-type custom state.
+ */
+function selectContextOnlyPath(path: SessionEntry[], byId: { has(id: string): boolean }): SessionEntry[] {
+	const compaction = getLatestCompactionEntry(path);
+	if (!compaction) return path;
+	const compactionIndex = path.lastIndexOf(compaction);
+	const firstKeptIndex = path.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+	const cutIndex = firstKeptIndex >= 0 && firstKeptIndex < compactionIndex ? firstKeptIndex : compactionIndex;
+
+	const latestByKey = new Map<string, number>();
+	for (let i = 0; i < cutIndex; i++) {
+		const entry = path[i];
+		if (entry.type === "thinking_level_change") latestByKey.set("thinking_level", i);
+		else if (entry.type === "model_change" || (entry.type === "message" && entry.message.role === "assistant"))
+			latestByKey.set("model", i);
+		else if (entry.type === "session_info") latestByKey.set("session_info", i);
+		else if (entry.type === "custom") latestByKey.set(`custom:${entry.customType}`, i);
+	}
+
+	const carried: SessionEntry[] = [];
+	for (const index of [...latestByKey.values()].sort((a, b) => a - b)) {
+		const entry = path[index];
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			// The assistant message itself is summarized away; keep only the model it established.
+			const modelChange: ModelChangeEntry = {
+				type: "model_change",
+				id: generateId(byId),
+				parentId: entry.parentId,
+				timestamp: entry.timestamp,
+				provider: entry.message.provider,
+				modelId: entry.message.model,
+			};
+			carried.push(modelChange);
+		} else {
+			carried.push(entry);
+		}
+	}
+	return [...carried, ...path.slice(cutIndex)];
 }
 
 function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "thinkingLevel" | "model"> {
@@ -1422,14 +1475,17 @@ export class SessionManager {
 	/**
 	 * Create a new session file containing only the path from root to the specified leaf.
 	 * Useful for extracting a single conversation path from a branched session.
+	 * With `contextOnly`, a compacted path is reduced to what the LLM currently sees (see
+	 * CreateBranchedSessionOptions).
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
-	createBranchedSession(leafId: string): string | undefined {
+	createBranchedSession(leafId: string, options?: CreateBranchedSessionOptions): string | undefined {
 		const previousSessionFile = this.sessionFile;
-		const path = this.getBranch(leafId);
-		if (path.length === 0) {
+		const fullPath = this.getBranch(leafId);
+		if (fullPath.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
 		}
+		const path = options?.contextOnly ? selectContextOnlyPath(fullPath, this.byId) : fullPath;
 
 		// Filter out LabelEntry from path - we'll recreate them from the resolved map.
 		// Because labels are real tree entries, later entries can be children of labels;
