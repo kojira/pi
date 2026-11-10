@@ -334,7 +334,7 @@ it.each(["new_session", "switch_session", "fork", "clone"] as const)(
 	},
 );
 
-it("refuses guarded prompt and settings while running without queue mutation", async () => {
+it("refuses a guarded prompt but applies settings while running, without queue mutation", async () => {
 	const { h, command } = await setup();
 	let release!: () => void;
 	const held = new Promise<void>((resolve) => {
@@ -362,7 +362,7 @@ it("refuses guarded prompt and settings while running without queue mutation", a
 				expectedRevision: h.session.settingsRevision,
 				thinkingLevel: "high",
 			}),
-		).toMatchObject({ success: true, data: { applied: false, reason: "busy" } });
+		).toMatchObject({ success: true, data: { applied: true, thinkingLevel: "high" } });
 		expect(h.session.pendingMessageCount).toBe(0);
 	} finally {
 		release();

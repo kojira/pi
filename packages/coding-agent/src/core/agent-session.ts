@@ -1370,7 +1370,7 @@ export class AgentSession {
 		const release = this.beginRuntimeSettingsActivity();
 		const epoch = this._continuationCancellationGeneration;
 		try {
-			await this._prompt(text, options, epoch);
+			await this._prompt(text, options, epoch, release);
 		} catch (error) {
 			// A hook can propagate a nested guarded refusal after already producing effects.
 			if (expected !== undefined && error instanceof GuardedPromptRefusal)
@@ -1381,7 +1381,12 @@ export class AgentSession {
 		}
 	}
 
-	private async _prompt(text: string, options: PromptOptions | undefined, epoch: number): Promise<void> {
+	private async _prompt(
+		text: string,
+		options: PromptOptions | undefined,
+		epoch: number,
+		endPreflight: () => void,
+	): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// This validity check also travels through compaction's auth/hooks/preappend awaits.
 		// Unlike the outer idle check, it permits this prompt's own compaction activity.
@@ -1574,6 +1579,8 @@ export class AgentSession {
 		assertSettings();
 		if (options?.expectedSettingsRevision !== undefined)
 			this._pendingNextTurnMessages.splice(0, pendingNextTurnCount);
+		// Settings may change while the run works; each turn reads them at its boundary.
+		endPreflight();
 		await this._runAgentPrompt(messages);
 	}
 
@@ -1992,6 +1999,7 @@ export class AgentSession {
 		};
 	}
 
+	/** Guarded prompt admission only; settings updates may land while a run works. */
 	private get _runtimeSettingsIdle(): boolean {
 		return (
 			!this._disposed &&
@@ -2029,15 +2037,22 @@ export class AgentSession {
 		if (update.thinkingLevel !== undefined && !THINKING_LEVEL_OPTIONS.includes(update.thinkingLevel))
 			throw new Error("Invalid thinkingLevel");
 		if (update.expectedRevision !== this.settingsRevision) return { applied: false, reason: "revision_changed" };
-		if (!this._runtimeSettingsIdle) return { applied: false, reason: "busy" };
+		// A working run is not busy: an in-flight request keeps its model and the next turn reads the new pair.
+		const busy = () => this._disposed || this._settingsActivities !== 0 || this.isCompacting;
+		if (busy()) return { applied: false, reason: "busy" };
 		const epoch = this._settingsActivityEpoch;
 		const cancellation = this._continuationCancellationGeneration;
-		const model =
-			update.provider === undefined
-				? this.model
-				: this._modelRuntime
-						.getAvailableSnapshot()
-						.find((candidate) => candidate.provider === update.provider && candidate.id === update.modelId);
+		const findModel = () =>
+			this._modelRuntime
+				.getAvailableSnapshot()
+				.find((candidate) => candidate.provider === update.provider && candidate.id === update.modelId);
+		let model = update.provider === undefined ? this.model : findModel();
+		if (!model && update.provider !== undefined) {
+			// models.json or the provider's refreshModels list may have gained the model after startup.
+			// Same bounded catalog refresh as RPC startup, restricted to the requested provider.
+			await this._modelRuntime.refresh({ providers: [update.provider], signal: AbortSignal.timeout(15_000) });
+			model = findModel();
+		}
 		if (!model) throw new Error("Model not found");
 		// Authentication is not a lock: ordinary work may proceed while it resolves.
 		let authorized = true;
@@ -2054,7 +2069,7 @@ export class AgentSession {
 		)
 			return { applied: false, reason: "busy" };
 		if (update.expectedRevision !== this.settingsRevision) return { applied: false, reason: "revision_changed" };
-		if (!this._runtimeSettingsIdle) return { applied: false, reason: "busy" };
+		if (busy()) return { applied: false, reason: "busy" };
 		if (authError !== undefined) throw authError;
 		if (!authorized) throw new Error(`No API key for ${model.provider}/${model.id}`);
 		const previousModel = this.model;
