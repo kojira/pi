@@ -1,4 +1,8 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GuardedPromptRefusal } from "../../src/core/agent-session.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
@@ -208,7 +212,7 @@ describe("AgentSession guarded runtime settings", () => {
 		expect(await h.session.setRuntimeSettings(update(h))).toMatchObject({ applied: true });
 	});
 
-	it("keeps guarded settings busy through automatic retry backoff", async () => {
+	it("applies settings during automatic retry backoff while guarded prompts stay refused", async () => {
 		const h = await setup({
 			settings: { compaction: { enabled: false }, retry: { enabled: true, maxRetries: 1, baseDelayMs: 60000 } },
 		});
@@ -217,13 +221,128 @@ describe("AgentSession guarded runtime settings", () => {
 		const prompt = h.session.prompt("retry");
 		await vi.advanceTimersByTimeAsync(0);
 		expect(h.session.isRetrying).toBe(true);
-		expect(await h.session.setRuntimeSettings(update(h))).toEqual({ applied: false, reason: "busy" });
+		expect(await h.session.setRuntimeSettings(update(h))).toMatchObject({ applied: true });
+		await expect(
+			h.session.prompt("not admitted", { expectedSettingsRevision: h.session.settingsRevision }),
+		).rejects.toMatchObject({ reason: "busy" });
 		await h.session.abort();
 		await prompt;
-		expect(await h.session.setRuntimeSettings(update(h))).toMatchObject({ applied: true });
 	});
 
-	it("refuses pending parent queues without consuming them or touching independent children", async () => {
+	it("leaves an in-flight request on its model and uses the new pair from the next turn", async () => {
+		const noop: AgentTool = {
+			name: "noop",
+			label: "Noop",
+			description: "Do nothing",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+		};
+		const h = await setup({ tools: [noop] });
+		const gate = deferred();
+		const began = deferred();
+		const requests: string[] = [];
+		h.setResponses([
+			async (_context, _options, _state, model) => {
+				requests.push(model.id);
+				began.resolve();
+				await gate.promise;
+				return fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" });
+			},
+			(context, options, _state, model) => {
+				requests.push(`${model.id}/${options?.reasoning}`);
+				return workResponse("done", context);
+			},
+		]);
+		const prompt = h.session.prompt("work");
+		await began.promise;
+		expect(h.session.isStreaming).toBe(true);
+		expect(await h.session.setRuntimeSettings(update(h))).toMatchObject({
+			applied: true,
+			model: { id: "second" },
+			thinkingLevel: "high",
+		});
+		gate.resolve();
+		await prompt;
+		expect(requests).toEqual(["first", "second/high"]);
+		expect(h.session.messages.filter((message) => message.role === "assistant").map((m) => m.model)).toEqual([
+			"first",
+			"second",
+		]);
+	});
+
+	it("selects a model added to models.json after startup and still rejects an unknown model", async () => {
+		const h = await setup({ modelsJson: { providers: {} } });
+		const late = { provider: "late", modelId: "added" };
+		await expect(
+			h.session.setRuntimeSettings({ ...late, expectedRevision: h.session.settingsRevision }),
+		).rejects.toThrow("Model not found");
+		writeFileSync(
+			join(h.tempDir, "models.json"),
+			JSON.stringify({
+				providers: {
+					late: {
+						baseUrl: "http://localhost:1/v1",
+						apiKey: "test-key",
+						api: "openai-completions",
+						models: [
+							{
+								id: "added",
+								name: "Added",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 100000,
+								maxTokens: 8000,
+							},
+						],
+					},
+				},
+			}),
+		);
+		expect(
+			await h.session.setRuntimeSettings({ ...late, expectedRevision: h.session.settingsRevision }),
+		).toMatchObject({ applied: true, model: { provider: "late", id: "added" } });
+		await expect(
+			h.session.setRuntimeSettings({
+				provider: "late",
+				modelId: "missing",
+				expectedRevision: h.session.settingsRevision,
+			}),
+		).rejects.toThrow("Model not found");
+		expect(h.session.model?.id).toBe("added");
+	});
+
+	it("selects a model that an extension provider's refreshModels list gained after startup", async () => {
+		const h = await setup();
+		const entry = (id: string) => ({
+			id,
+			name: id,
+			reasoning: false,
+			input: ["text" as const],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100000,
+			maxTokens: 8000,
+		});
+		const served = [entry("startup")];
+		h.session.modelRuntime.registerProvider("dynamic", {
+			baseUrl: "http://localhost:1/v1",
+			apiKey: "test-key",
+			api: "openai-completions",
+			models: [entry("startup")],
+			refreshModels: async () => [...served],
+		});
+		await h.session.modelRuntime.refresh({ allowNetwork: false });
+		const late = { provider: "dynamic", modelId: "late" };
+		await expect(
+			h.session.setRuntimeSettings({ ...late, expectedRevision: h.session.settingsRevision }),
+		).rejects.toThrow("Model not found");
+		served.push(entry("late"));
+		expect(
+			await h.session.setRuntimeSettings({ ...late, expectedRevision: h.session.settingsRevision }),
+		).toMatchObject({ applied: true, model: { provider: "dynamic", id: "late" } });
+	});
+
+	it("applies settings with pending parent queues without consuming them or touching independent children", async () => {
 		const h = await setup();
 		const child = await setup();
 		const childRevision = child.session.settingsRevision;
@@ -248,7 +367,7 @@ describe("AgentSession guarded runtime settings", () => {
 		await h.session.followUp("pending input");
 		expect(
 			await h.session.setRuntimeSettings({ expectedRevision: h.session.settingsRevision, thinkingLevel: "low" }),
-		).toEqual({ applied: false, reason: "busy" });
+		).toMatchObject({ applied: true, thinkingLevel: "low" });
 		await expect(
 			h.session.prompt("not queued", { expectedSettingsRevision: h.session.settingsRevision }),
 		).rejects.toBeInstanceOf(GuardedPromptRefusal);

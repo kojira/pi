@@ -325,14 +325,19 @@ A conflict returns `success:true` with
 `data:{"applied":false,"reason":"busy"}` or
 `data:{"applied":false,"reason":"revision_changed"}` without mutation. Invalid
 arguments, unknown models and authentication errors use `success:false,error`.
-Authentication may await while ordinary work proceeds. Pi then rechecks lifecycle,
-revision and parent idle state and commits the pair synchronously before notifying
-extensions. Hooks are not locked; an error after commit is not proof of no mutation.
+A model missing from the catalog is looked up once more after reloading
+`models.json` and that provider's `refreshModels` list (bounded to 15 seconds)
+before it is reported as unknown. Authentication may await while ordinary work proceeds. Pi
+then rechecks lifecycle and revision and commits the pair synchronously before
+notifying extensions. Hooks are not locked; an error after commit is not proof of
+no mutation.
 
-Admission includes prompt preflight, active run/retry/continuation, compaction
-(including admission before authentication), navigation/replacement/reload and
-pending steering/follow-up queues. It does not stop independent children or alter
-their runtimes. This is not permission to retire a process or invoke manual
+An active run, retry backoff or pending steering/follow-up queue does not make the
+update busy: a request that is already streaming finishes on its model and the next
+model request uses the new pair. `busy` is returned only during prompt preflight,
+compaction (including admission before authentication) and
+navigation/replacement/reload. The update does not stop independent children or
+alter their runtimes. This is not permission to retire a process or invoke manual
 compaction on an active parent. The existing `compact` command is unchanged and
 can abort the parent; there is no guarded compact operation.
 
