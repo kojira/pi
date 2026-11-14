@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { gzipSync } from "zlib";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import {
@@ -78,6 +79,15 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("read tool", () => {
+		it("should read gzip-compressed text with offset and limit", async () => {
+			const testFile = join(testDir, "session.jsonl.gz");
+			writeFileSync(testFile, gzipSync("line 1\nline 2\nline 3\nline 4"));
+
+			const result = await readTool.execute("test-call-gz", { path: testFile, offset: 2, limit: 2 });
+
+			expect(getTextOutput(result)).toBe("line 2\nline 3\n\n[1 more lines in file. Use offset=4 to continue.]");
+		});
+
 		it("should read file contents that fit within limits", async () => {
 			const testFile = join(testDir, "test.txt");
 			const content = "Hello, world!\nLine 2\nLine 3";
@@ -780,6 +790,17 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("grep tool", () => {
+		it("should find matches inside gzip-compressed files with line numbers and context", async () => {
+			writeFileSync(join(testDir, "old.log.gz"), gzipSync("first\nbefore\nneedle here\nafter\nlast"));
+
+			const result = await grepTool.execute("test-call-grep-gz", { pattern: "needle", path: testDir, context: 1 });
+
+			const output = getTextOutput(result);
+			expect(output).toContain("old.log.gz-2- before");
+			expect(output).toContain("old.log.gz:3: needle here");
+			expect(output).toContain("old.log.gz-4- after");
+		});
+
 		it("should include filename when searching a single file", async () => {
 			const testFile = join(testDir, "example.txt");
 			writeFileSync(testFile, "first line\nmatch line\nlast line");
