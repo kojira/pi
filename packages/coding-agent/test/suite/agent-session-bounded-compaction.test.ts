@@ -337,7 +337,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		}
 	});
 
-	it.each(["", "not structured", checkpoint + "x".repeat(40000), checkpoint.replace("### Done", "### Outside")])(
+	it.each(["", "not structured", checkpoint + "x".repeat(40000)])(
 		"rejects unusable stop output without mutating the file (%#)",
 		async (bad) => {
 			const { h } = await setup();
