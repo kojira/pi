@@ -411,6 +411,8 @@ const OPENAI_TOOL_SEARCH_MODEL_IDS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 	"gpt-6-astra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
 ]);
 // Public OpenAI documents additional_tools for applications that load tools
 // outside the normal tool-search flow. Codex currently uses the input item for
@@ -422,6 +424,8 @@ const OPENAI_CODEX_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 	"gpt-6-astra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
 ]);
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272000;
 const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
@@ -431,6 +435,8 @@ const OPENAI_SHORT_CONTEXT_CAPPED_MODEL_IDS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 	"gpt-6-astra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
 ]);
 const OPENAI_LONG_CONTEXT_PRICING_MODEL_IDS = new Set([
 	"gpt-5.4",
@@ -441,6 +447,8 @@ const OPENAI_LONG_CONTEXT_PRICING_MODEL_IDS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 	"gpt-6-astra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
 ]);
 
 function withOpenAiLongContextPricing(cost: Model<Api>["cost"]): Model<Api>["cost"] {
@@ -590,13 +598,14 @@ function supportsOpenAiXhigh(modelId: string): boolean {
 		modelId.includes("gpt-5.4") ||
 		modelId.includes("gpt-5.5") ||
 		modelId.includes("gpt-5.6") ||
-		modelId.includes("gpt-6-astra")
+		modelId.includes("gpt-6-astra") ||
+		modelId.includes("gpt-6.2")
 	);
 }
 
 function supportsOpenAiMax(model: Model<Api>): boolean {
 	return (
-		(model.id.includes("gpt-5.6") || model.id.includes("gpt-6-astra")) &&
+		(model.id.includes("gpt-5.6") || model.id.includes("gpt-6-astra") || model.id.includes("gpt-6.2")) &&
 		(model.api === "openai-responses" ||
 			model.api === "azure-openai-responses" ||
 			model.api === "openai-codex-responses" ||
@@ -933,7 +942,7 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (
-		model.id === "gpt-6-astra" &&
+		(model.id === "gpt-6-astra" || model.id === "gpt-6.2-astra" || model.id === "gpt-6.2-sol") &&
 		(model.api === "openai-responses" ||
 			model.api === "azure-openai-responses" ||
 			model.api === "openai-codex-responses")
@@ -2570,6 +2579,30 @@ async function generateModels() {
 	// Add missing gpt models
 	const missingOpenAiModels: Model<"openai-responses">[] = [
 		{
+			id: "gpt-6.2-astra",
+			name: "GPT-6.2 Astra",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			provider: "openai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: withOpenAiLongContextPricing({ input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 }),
+			contextWindow: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
+			maxTokens: 128000,
+		},
+		{
+			id: "gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			provider: "openai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: withOpenAiLongContextPricing({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }),
+			contextWindow: OPENAI_LONG_CONTEXT_INPUT_THRESHOLD,
+			maxTokens: 128000,
+		},
+		{
 			id: "gpt-6-astra",
 			name: "GPT-6 Astra",
 			api: "openai-responses",
@@ -2786,13 +2819,37 @@ async function generateModels() {
 
 	// OpenAI Codex (ChatGPT OAuth) models
 	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Older model limits are based on observed server behavior; GPT-5.6 and GPT-6 Astra use Codex's 272k default catalog limit.
+	// Older model limits are based on observed server behavior; GPT-5.6, GPT-6 Astra, and GPT-6.2 use Codex's 272k default catalog limit.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
 	const CODEX_GPT_56_CONTEXT = 272000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
+		{
+			id: "gpt-6.2-astra",
+			name: "GPT-6.2 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: withOpenAiLongContextPricing({ input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 }),
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
+		{
+			id: "gpt-6.2-sol",
+			name: "GPT-6.2 Sol",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: withOpenAiLongContextPricing({ input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }),
+			contextWindow: CODEX_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
 		{
 			id: "gpt-6-astra",
 			name: "GPT-6 Astra",

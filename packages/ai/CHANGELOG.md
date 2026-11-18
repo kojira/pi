@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added GPT-6.2 Astra and GPT-6.2 Sol for OpenAI API keys and OpenAI Codex subscriptions.
+
 ### Fixed
 
 - Fixed quadratic CPU usage when draining buffered `EventStream` events ([#9055](https://github.com/earendil-works/pi/issues/9055)).
