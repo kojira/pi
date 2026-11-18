@@ -156,16 +156,6 @@ export function validateBoundedSummary(text: string, outputCap: number): void {
 	) {
 		throw new BoundedCompactionError("invalid structured summary sections");
 	}
-	const progress = text.slice(sections[2].index! + sections[2][0].length, sections[3].index);
-	const progressHeadings = [...progress.matchAll(/^### ([^\r\n]+)\r?$/gm)];
-	const expectedProgress = ["Done", "In Progress", "Blocked"];
-	if (
-		progressHeadings.length !== expectedProgress.length ||
-		// A subsection may be empty (e.g. nothing is blocked); only its heading is required.
-		progressHeadings.some((h, i) => h[1] !== expectedProgress[i])
-	) {
-		throw new BoundedCompactionError("incomplete Progress sections");
-	}
 }
 
 function safeEnd(text: string, end: number): number {

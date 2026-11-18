@@ -601,8 +601,7 @@ describe("validateBoundedSummary", () => {
 		const summary =
 			"## Goal\nShip it.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\nFixed it.\n### In Progress\nDeploying.\n### Blocked\n## Key Decisions\nOne at a time.\n## Next Steps\nVerify.\n## Critical Context\nNone.";
 		expect(() => validateBoundedSummary(summary, 10_000)).not.toThrow();
-		expect(() => validateBoundedSummary(summary.replace("### Blocked\n", ""), 10_000)).toThrow(
-			"incomplete Progress sections",
-		);
+		// Progress subheadings are guidance for the model, not a reason to reject a checkpoint.
+		expect(() => validateBoundedSummary(summary.replace("### Blocked\n", ""), 10_000)).not.toThrow();
 	});
 });
