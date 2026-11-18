@@ -4,6 +4,7 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { validateBoundedSummary } from "../src/core/compaction/bounded-compaction.ts";
 import {
 	type CompactionSettings,
 	calculateContextTokens,
@@ -593,4 +594,15 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		console.log("Original messages:", loaded.messages.length);
 		console.log("After compaction:", reloaded.messages.length);
 	}, 60000);
+});
+
+describe("validateBoundedSummary", () => {
+	it("accepts an empty Progress subsection such as nothing Blocked", () => {
+		const summary =
+			"## Goal\nShip it.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\nFixed it.\n### In Progress\nDeploying.\n### Blocked\n## Key Decisions\nOne at a time.\n## Next Steps\nVerify.\n## Critical Context\nNone.";
+		expect(() => validateBoundedSummary(summary, 10_000)).not.toThrow();
+		expect(() => validateBoundedSummary(summary.replace("### Blocked\n", ""), 10_000)).toThrow(
+			"incomplete Progress sections",
+		);
+	});
 });

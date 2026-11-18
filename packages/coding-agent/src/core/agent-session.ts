@@ -2816,13 +2816,13 @@ export class AgentSession {
 			await this._autoCompactionRun;
 			return false;
 		}
+		const settings = this.settingsManager.getCompactionSettings();
+		this._autoCompactionFailure = undefined;
+		const release = this.beginRuntimeSettingsActivity();
 		let finishRun!: () => void;
 		this._autoCompactionRun = new Promise<void>((resolve) => {
 			finishRun = resolve;
 		});
-		const settings = this.settingsManager.getCompactionSettings();
-		this._autoCompactionFailure = undefined;
-		const release = this.beginRuntimeSettingsActivity();
 		let started = false;
 		let fromExtension = false;
 
