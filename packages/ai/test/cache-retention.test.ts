@@ -401,6 +401,8 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		it.each([
 			["gpt-4o-mini", "24h", undefined],
 			["gpt-6-astra", undefined, { ttl: "30m" }],
+			["gpt-6.2-astra", undefined, { ttl: "30m" }],
+			["gpt-6.2-sol", undefined, { ttl: "30m" }],
 		] as const)("should use the supported long cache field for %s", async (modelId, retention, cacheOptions) => {
 			const model = getModel("openai", modelId);
 			let capturedPayload: OpenAIResponsesCachePayload | undefined;
