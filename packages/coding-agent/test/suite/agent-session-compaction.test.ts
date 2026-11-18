@@ -346,6 +346,24 @@ describe("AgentSession compaction characterization", () => {
 		expect(getStreamCallCount()).toBe(1);
 	});
 
+	it("runs one automatic compaction at a time when two start together", async () => {
+		const harness = await createHarness({ withConfiguredAuth: false });
+		harnesses.push(harness);
+		seedCompactableSession(harness);
+		const getStreamCallCount = useSummaryStreamFn(harness, "single overlapped summary");
+		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+
+		const [first, second] = await Promise.all([
+			sessionInternals._runAutoCompaction("threshold", false),
+			sessionInternals._runAutoCompaction("threshold", false),
+		]);
+
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.errorMessage)).toEqual([]);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(getStreamCallCount()).toBe(1);
+		expect([first, second]).toContain(false);
+	});
+
 	it("notifies extensions when auto-compaction fails", async () => {
 		const failedEvents: Array<{
 			reason: "manual" | "threshold" | "overflow";

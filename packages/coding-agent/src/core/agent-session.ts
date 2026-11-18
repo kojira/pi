@@ -397,6 +397,7 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	private _autoCompactionRun: Promise<void> | undefined = undefined;
 	private _autoCompactionGeneration = 0;
 	private _autoCompactionFailureGeneration = 0;
 	private _autoCompactionFailure: { key: string | undefined; error: unknown } | undefined;
@@ -2809,9 +2810,19 @@ export class AgentSession {
 		willRetry: boolean,
 		assertPromptAdmission?: () => void,
 	): Promise<boolean> {
+		// One automatic compaction at a time: a second caller waits for the running one
+		// instead of starting another that shares (and would clear) its abort controller.
+		if (this._autoCompactionRun) {
+			await this._autoCompactionRun;
+			return false;
+		}
 		const settings = this.settingsManager.getCompactionSettings();
 		this._autoCompactionFailure = undefined;
 		const release = this.beginRuntimeSettingsActivity();
+		let finishRun!: () => void;
+		this._autoCompactionRun = new Promise<void>((resolve) => {
+			finishRun = resolve;
+		});
 		let started = false;
 		let fromExtension = false;
 
@@ -3018,6 +3029,8 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
+			this._autoCompactionRun = undefined;
+			finishRun();
 			release();
 			this._resolveIdleWaitIfIdle();
 		}

@@ -161,11 +161,8 @@ export function validateBoundedSummary(text: string, outputCap: number): void {
 	const expectedProgress = ["Done", "In Progress", "Blocked"];
 	if (
 		progressHeadings.length !== expectedProgress.length ||
-		progressHeadings.some(
-			(h, i) =>
-				h[1] !== expectedProgress[i] ||
-				!progress.slice(h.index! + h[0].length, progressHeadings[i + 1]?.index ?? progress.length).trim(),
-		)
+		// A subsection may be empty (e.g. nothing is blocked); only its heading is required.
+		progressHeadings.some((h, i) => h[1] !== expectedProgress[i])
 	) {
 		throw new BoundedCompactionError("incomplete Progress sections");
 	}

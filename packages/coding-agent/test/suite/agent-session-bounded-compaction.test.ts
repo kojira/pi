@@ -337,20 +337,17 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		}
 	});
 
-	it.each([
-		"",
-		"not structured",
-		checkpoint + "x".repeat(40000),
-		checkpoint.replace("### Done\n- Confirmed fixture.", "### Done"),
-		checkpoint.replace("### Done", "### Outside"),
-	])("rejects unusable stop output without mutating the file (%#)", async (bad) => {
-		const { h } = await setup();
-		const prefix = readFileSync(h.session.sessionFile!, "utf8");
-		const leaf = h.sessionManager.getLeafId();
-		h.setResponses([fauxAssistantMessage(bad)]);
-		await expect(h.session.compact()).rejects.toThrow();
-		unchanged(h, prefix, leaf);
-	});
+	it.each(["", "not structured", checkpoint + "x".repeat(40000), checkpoint.replace("### Done", "### Outside")])(
+		"rejects unusable stop output without mutating the file (%#)",
+		async (bad) => {
+			const { h } = await setup();
+			const prefix = readFileSync(h.session.sessionFile!, "utf8");
+			const leaf = h.sessionManager.getLeafId();
+			h.setResponses([fauxAssistantMessage(bad)]);
+			await expect(h.session.compact()).rejects.toThrow();
+			unchanged(h, prefix, leaf);
+		},
+	);
 
 	it.each(["length", "aborted", "toolUse"] as const)("does not adopt %s output", async (stopReason) => {
 		const { h } = await setup();
