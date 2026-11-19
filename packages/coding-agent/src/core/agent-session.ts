@@ -2414,8 +2414,13 @@ export class AgentSession {
 			tools: this.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })),
 			messages: [...llmMessages, { role: "user" as const, content: CONTINUATION_USER_TEXT, timestamp: Date.now() }],
 		};
-		const input =
-			Math.max(estimateRequestTokens(context).tokens, Math.ceil(JSON.stringify(context).length / 4)) + 4096;
+		// Image payloads are base64; their length says nothing about their token cost
+		// (estimateRequestTokens already counts each image), so leave them out of the
+		// serialized-size fallback.
+		const serialized = JSON.stringify(context, (key, value) =>
+			key === "data" && typeof value === "string" && value.length > 1024 ? "" : value,
+		);
+		const input = Math.max(estimateRequestTokens(context).tokens, Math.ceil(serialized.length / 4)) + 4096;
 		const slack = Math.max(4096, Math.ceil(model.contextWindow * 0.05));
 		// A catalog output maximum is not a mandatory reservation. Clamp the
 		// intended allowance to the measured native budget, retaining its slack.

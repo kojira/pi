@@ -89,6 +89,27 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
 	}
 
+	it("does not count base64 image bytes as text when checking the retained tail fits", async () => {
+		const { h } = await setup();
+		// A recent tool result with a large image stays in the kept tail. Its base64
+		// size (≈1.2M chars, ≈300K tokens if read as text) must not block compaction
+		// in a 200K window; the image itself costs a fixed estimate.
+		h.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-1",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: "A".repeat(1_200_000), mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+		await h.session.compact();
+		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(1);
+	});
+
 	it.each([1000000, 200000])("uses the model window, not a fixed small cap (%i)", async (window) => {
 		const { h, captures } = await setup("日本語 data\n".repeat(93334), window);
 		await h.session.compact();
