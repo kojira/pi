@@ -173,7 +173,8 @@ describe("generateSummary reasoning options", () => {
 			settings: { enabled: true, reserveTokens: 4096, keepRecentTokens: 20 },
 		};
 
-		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow("tools are not allowed");
+		// A tool call with no text is not a summary.
+		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow("empty summary");
 	});
 
 	it("rejects a length-limited history summary with content-free usage metrics", async () => {
@@ -222,7 +223,7 @@ describe("generateSummary reasoning options", () => {
 		);
 	});
 
-	it("rejects a length-limited split-turn summary with content-free metrics", async () => {
+	it("accepts the text of a length-limited split-turn summary", async () => {
 		completeSimpleMock.mockResolvedValueOnce({
 			...mockSummaryResponse,
 			stopReason: "length",
@@ -238,9 +239,7 @@ describe("generateSummary reasoning options", () => {
 			settings: { enabled: true, reserveTokens: 4096, keepRecentTokens: 20 },
 		};
 
-		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow(
-			/generation hit the token cap and the summary is incomplete/,
-		);
+		expect((await compact(preparation, createModel(false), "test-key")).summary).toBe("## Original Request\npartial");
 	});
 
 	it("does not set reasoning when thinking is off", async () => {

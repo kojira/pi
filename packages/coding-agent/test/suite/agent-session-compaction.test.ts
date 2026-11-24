@@ -437,7 +437,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(prompt).not.toContain("PRESERVE all existing information");
 	});
 
-	it("does not repeat a truncated threshold summary after every tool in the same user turn", async () => {
+	it("does not repeat a failed threshold summary after every tool in the same user turn", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		seedCompactableSession(harness);
@@ -450,7 +450,7 @@ describe("AgentSession compaction characterization", () => {
 					type: "done",
 					reason: "stop",
 					message: {
-						...fauxAssistantMessage("incomplete", { stopReason: "length" }),
+						...fauxAssistantMessage(""),
 						api: model.api,
 						provider: model.provider,
 						model: model.id,
@@ -468,7 +468,7 @@ describe("AgentSession compaction characterization", () => {
 			});
 		await internals._checkCompaction(thresholdResponse());
 		expect(calls).toBe(1);
-		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toContain("generation hit the token cap");
+		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toContain("empty summary");
 		await internals._checkCompaction(thresholdResponse());
 		await internals._compactBeforeNextAssistantResponse({
 			...harness.session.agent.state,

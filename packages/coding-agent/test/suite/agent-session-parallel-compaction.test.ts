@@ -177,12 +177,12 @@ describe("AgentSession parallel bounded compaction", () => {
 			const completion = h.session.compact().catch((error: unknown) => error);
 			await vi.advanceTimersByTimeAsync(0);
 			expect(pending).toHaveLength(4);
-			if (mode === "failure") pending[1].resolve(fauxAssistantMessage("invalid structured checkpoint"));
+			if (mode === "failure") pending[1].resolve(fauxAssistantMessage(""));
 			else if (mode === "abort") h.session.abortCompaction();
 			else await vi.advanceTimersByTimeAsync(480000);
 			expect(await completion).toMatchObject({
 				message: expect.stringMatching(
-					mode === "failure" ? /structured/ : mode === "deadline" ? /8-minute deadline/ : /abort/i,
+					mode === "failure" ? /empty summary/ : mode === "deadline" ? /8-minute deadline/ : /abort/i,
 				),
 			});
 			expect(pending.every((p) => p.signal.aborted)).toBe(true);

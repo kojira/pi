@@ -231,7 +231,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		const leaf = h.sessionManager.getLeafId();
 		let ordinary = 0;
 		h.setResponses([
-			fauxAssistantMessage(checkpoint, { stopReason: "length" }),
+			fauxAssistantMessage(""),
 			() => {
 				ordinary++;
 				return fauxAssistantMessage("must not submit");
@@ -292,7 +292,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			fauxAssistantMessage(fauxToolCall("grow", {}), {
 				stopReason: "toolUse",
 			}),
-			fauxAssistantMessage(checkpoint, { stopReason: "length" }),
+			fauxAssistantMessage(""),
 			(context) => {
 				// The second leaf may already be in flight when the first fails.
 				if (context.systemPrompt?.includes("context summarization assistant"))
@@ -358,29 +358,48 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		}
 	});
 
-	it.each(["", "not structured", checkpoint + "x".repeat(40000)])(
-		"rejects unusable stop output without mutating the file (%#)",
-		async (bad) => {
-			const { h } = await setup();
-			const prefix = readFileSync(h.session.sessionFile!, "utf8");
-			const leaf = h.sessionManager.getLeafId();
-			h.setResponses([fauxAssistantMessage(bad)]);
-			await expect(h.session.compact()).rejects.toThrow();
-			unchanged(h, prefix, leaf);
-		},
-	);
-
-	it.each(["length", "aborted", "toolUse"] as const)("does not adopt %s output", async (stopReason) => {
+	it.each([
+		["empty", fauxAssistantMessage("")],
+		["aborted", fauxAssistantMessage(checkpoint, { stopReason: "aborted" })],
+		[
+			"tool call without text",
+			fauxAssistantMessage(fauxToolCall("read", { path: "not-run" }), { stopReason: "toolUse" }),
+		],
+	])("rejects a summary with no usable text without mutating the file (%s)", async (_label, bad) => {
 		const { h } = await setup();
 		const prefix = readFileSync(h.session.sessionFile!, "utf8");
 		const leaf = h.sessionManager.getLeafId();
-		h.setResponses([
-			fauxAssistantMessage(stopReason === "toolUse" ? fauxToolCall("read", { path: "not-run" }) : checkpoint, {
-				stopReason,
-			}),
-		]);
+		h.setResponses([bad]);
 		await expect(h.session.compact()).rejects.toThrow();
 		unchanged(h, prefix, leaf);
+	});
+
+	it("accepts any substantive text summary: no headings, beside tool blocks, at the cap, or over-length", async () => {
+		const { h } = await setup();
+		h.setResponses([fauxAssistantMessage("plain notes without any headings")]);
+		expect((await h.session.compact()).summary).toBe("plain notes without any headings");
+		await h.session.prompt("next");
+		h.setResponses([
+			fauxAssistantMessage(
+				[{ type: "text", text: "notes beside a tool call" }, fauxToolCall("read", { path: "x" })],
+				{
+					stopReason: "toolUse",
+				},
+			),
+		]);
+		expect((await h.session.compact()).summary).toBe("notes beside a tool call");
+		await h.session.prompt("next");
+		h.setResponses([fauxAssistantMessage("cut at the token cap", { stopReason: "length" })]);
+		expect((await h.session.compact()).summary).toBe("cut at the token cap");
+		await h.session.prompt("next");
+		// Over the 13107-token allowance: truncated to the cap instead of rejected.
+		const long = `## Goal\n${"x".repeat(40000)}`;
+		h.setResponses([fauxAssistantMessage(long)]);
+		const truncated = (await h.session.compact()).summary;
+		expect(long.startsWith(truncated)).toBe(true);
+		expect(truncated.length).toBeLessThan(long.length);
+		expect(estimateSummaryTextTokens(truncated)).toBeLessThanOrEqual(13107);
+		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(4);
 	});
 
 	it("rejects a retained tail that cannot fit before asking the provider", async () => {
@@ -910,7 +929,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			model: h.getModel().id,
 			usage: { ...fauxAssistantMessage("").usage, input: 190000, totalTokens: 190000 },
 		};
-		h.setResponses([fauxAssistantMessage("malformed output"), fauxAssistantMessage(checkpoint)]);
+		h.setResponses([fauxAssistantMessage(""), fauxAssistantMessage(checkpoint)]);
 		await internals._checkCompaction(trigger);
 		await internals._checkCompaction(trigger);
 		expect(h.faux.state.callCount).toBe(1);
@@ -953,14 +972,12 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			Array.from(
 				{ length: 64 },
 				() => (context: Context) =>
-					fauxAssistantMessage(
-						payload({ context, options: undefined }).kind === "merge" ? "bad merge" : checkpoint,
-					),
+					fauxAssistantMessage(payload({ context, options: undefined }).kind === "merge" ? "" : checkpoint),
 			),
 		);
 		const prefix = readFileSync(h.session.sessionFile!, "utf8");
 		const leaf = h.sessionManager.getLeafId();
-		await expect(h.session.compact()).rejects.toThrow(/structured/);
+		await expect(h.session.compact()).rejects.toThrow(/empty summary/);
 		unchanged(h, prefix, leaf);
 		h.setResponses([
 			() => {

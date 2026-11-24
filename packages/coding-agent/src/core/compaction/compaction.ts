@@ -16,7 +16,7 @@ import {
 	type SessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
-import { BoundedCompactionError, generateBoundedSummary, validateBoundedSummary } from "./bounded-compaction.ts";
+import { BoundedCompactionError, generateBoundedSummary } from "./bounded-compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -933,7 +933,6 @@ export async function compact(
 	});
 	const { readFiles, modifiedFiles } = computeFileLists(preparation.fileOps);
 	const summary = result.text + boundedFilePreview(readFiles, modifiedFiles, messages);
-	validateFinalSummary(summary, Math.min(Math.floor(preparation.settings.reserveTokens * 0.8), model.maxTokens));
 	if (!preparation.firstKeptEntryId) throw new BoundedCompactionError("first kept entry has no UUID");
 	return {
 		summary,
@@ -1038,9 +1037,4 @@ function recognizedFilePreview(suffix: string, details: CompactionDetails): bool
 	} catch {
 		return false;
 	}
-}
-
-function validateFinalSummary(summary: string, outputCap: number): void {
-	const marker = summary.lastIndexOf("\n\n<file-preview>");
-	validateBoundedSummary(marker < 0 ? summary : summary.slice(0, marker), outputCap);
 }

@@ -37,12 +37,14 @@ describe("#7048 truncated compaction summaries", () => {
 		harness = undefined;
 	});
 
-	it("does not persist a length-limited summary", async () => {
+	// Superseded: any substantive summary text is accepted, so a length stop is kept
+	// rather than rejected (a rejected summary used to leave the session unusable).
+	it("persists the text of a length-limited summary", async () => {
 		harness = await createHarness();
 		seedCompactableSession(harness);
 		harness.setResponses([fauxAssistantMessage("partial summar", { stopReason: "length" })]);
 
-		await expect(harness.session.compact()).rejects.toThrow("generation hit the token cap");
-		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		expect((await harness.session.compact()).summary).toBe("partial summar");
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	});
 });
