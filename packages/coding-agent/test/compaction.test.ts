@@ -4,7 +4,7 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { validateBoundedSummary } from "../src/core/compaction/bounded-compaction.ts";
+import { normalizeBoundedSummary } from "../src/core/compaction/bounded-compaction.ts";
 import {
 	type CompactionSettings,
 	calculateContextTokens,
@@ -596,12 +596,15 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 	}, 60000);
 });
 
-describe("validateBoundedSummary", () => {
-	it("accepts an empty Progress subsection such as nothing Blocked", () => {
-		const summary =
-			"## Goal\nShip it.\n## Constraints & Preferences\nKeep history.\n## Progress\n### Done\nFixed it.\n### In Progress\nDeploying.\n### Blocked\n## Key Decisions\nOne at a time.\n## Next Steps\nVerify.\n## Critical Context\nNone.";
-		expect(() => validateBoundedSummary(summary, 10_000)).not.toThrow();
-		// Progress subheadings are guidance for the model, not a reason to reject a checkpoint.
-		expect(() => validateBoundedSummary(summary.replace("### Blocked\n", ""), 10_000)).not.toThrow();
+describe("normalizeBoundedSummary", () => {
+	it("accepts any substantive text and rejects only empty or lone-surrogate output", () => {
+		expect(normalizeBoundedSummary("```\nfenced notes, no headings\n```", 10_000)).toBe(
+			"```\nfenced notes, no headings\n```",
+		);
+		expect(normalizeBoundedSummary("## Progress\n## Goal\nmisordered", 10_000)).toBe(
+			"## Progress\n## Goal\nmisordered",
+		);
+		expect(() => normalizeBoundedSummary("  \n", 10_000)).toThrow("empty summary");
+		expect(() => normalizeBoundedSummary("bad \uD800 text", 10_000)).toThrow("lone surrogates");
 	});
 });

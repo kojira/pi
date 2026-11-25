@@ -364,7 +364,7 @@ describe("AgentSession compaction characterization", () => {
 		expect([first, second]).toContain(false);
 	});
 
-	it("notifies extensions when auto-compaction fails", async () => {
+	it("reports auto-compaction summary failure and falls back to truncation", async () => {
 		const failedEvents: Array<{
 			reason: "manual" | "threshold" | "overflow";
 			errorMessage?: string;
@@ -390,21 +390,18 @@ describe("AgentSession compaction characterization", () => {
 
 		await expect(sessionInternals._runAutoCompaction("threshold", false)).resolves.toBe(false);
 
+		// The summary failure is reported, then replaced by a truncation entry.
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
 			reason: "threshold",
 			aborted: false,
 			willRetry: false,
-			errorMessage: "Auto-compaction failed: Summarization failed: summary generator blew up",
+			errorMessage:
+				"Auto-compaction failed; earlier history was omitted: Summarization failed: summary generator blew up",
 		});
-		expect(failedEvents).toEqual([
-			expect.objectContaining({
-				type: "session_compact_failed",
-				reason: "threshold",
-				aborted: false,
-				willRetry: false,
-				fromExtension: false,
-				errorMessage: "Auto-compaction failed: Summarization failed: summary generator blew up",
-			}),
+		expect(failedEvents).toEqual([]);
+		const entries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(entries.map((entry) => entry.summary)).toEqual([
+			"[earlier history omitted: compaction failed: Summarization failed: summary generator blew up]\n[current request: message to compact]",
 		]);
 	});
 
@@ -437,7 +434,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(prompt).not.toContain("PRESERVE all existing information");
 	});
 
-	it("does not repeat a truncated threshold summary after every tool in the same user turn", async () => {
+	it("does not repeat a failed threshold summary after every tool in the same user turn", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		seedCompactableSession(harness);
@@ -450,7 +447,7 @@ describe("AgentSession compaction characterization", () => {
 					type: "done",
 					reason: "stop",
 					message: {
-						...fauxAssistantMessage("incomplete", { stopReason: "length" }),
+						...fauxAssistantMessage(""),
 						api: model.api,
 						provider: model.provider,
 						model: model.id,
@@ -468,7 +465,8 @@ describe("AgentSession compaction characterization", () => {
 			});
 		await internals._checkCompaction(thresholdResponse());
 		expect(calls).toBe(1);
-		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toContain("generation hit the token cap");
+		expect(harness.eventsOfType("compaction_end").at(-1)?.errorMessage).toContain("empty summary");
+		// The failed summary was replaced by a truncation entry, so later tool results do not retry it.
 		await internals._checkCompaction(thresholdResponse());
 		await internals._compactBeforeNextAssistantResponse({
 			...harness.session.agent.state,
@@ -476,21 +474,7 @@ describe("AgentSession compaction characterization", () => {
 		} as AgentContext);
 		expect(calls).toBe(1);
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
-
-		harness.sessionManager.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "new request" }],
-			timestamp: Date.now(),
-		});
-		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
-		await internals._checkCompaction(thresholdResponse());
-		expect(calls).toBe(2);
-		// Switching A -> B -> A must not retain A's failed-turn suppression.
-		harness.sessionManager.appendModelChange(harness.getModel().provider, "other-model");
-		harness.sessionManager.appendModelChange(harness.getModel().provider, harness.getModel().id);
-		await internals._checkCompaction(thresholdResponse());
-		expect(calls).toBe(3);
-		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	});
 
 	it("compacts and resumes after a length stop below the desired output limit", async () => {

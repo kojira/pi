@@ -63,6 +63,7 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	computeFileLists,
 	estimateContextTokens,
 	estimateTokens,
 	generateBranchSummary,
@@ -363,6 +364,23 @@ interface SteeringRun {
 // Never reuse a revision when an RPC host replaces its session in the same process.
 let nextSettingsRevision = 0;
 
+/**
+ * Compaction entry text used when no summary could be generated. When the cut splits
+ * the current turn, its user request is kept (capped) so the model still knows the task.
+ */
+function truncationNote(preparation: CompactionPreparation, cause: string): string {
+	const request = preparation.isSplitTurn ? preparation.turnPrefixMessages[0] : undefined;
+	const requestText = request?.role === "user" ? contentText(request.content).slice(0, 4000) : "";
+	const note = `[earlier history omitted: compaction failed: ${cause}]${requestText ? `\n[current request: ${requestText}]` : ""}`;
+	return preparation.previousSummary ? `${preparation.previousSummary}\n\n${note}` : note;
+}
+
+/** Short failure cause for compaction warnings and the truncation note. */
+function compactionFailureReason(error: unknown): string {
+	if (error instanceof BoundedCompactionError) return error.reason;
+	return error instanceof Error ? error.message : String(error);
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -399,9 +417,7 @@ export class AgentSession {
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionRun: Promise<void> | undefined = undefined;
 	private _autoCompactionGeneration = 0;
-	private _autoCompactionFailureGeneration = 0;
-	private _autoCompactionFailure: { key: string | undefined; error: unknown } | undefined;
-	/** A truncated threshold summary is not retried after every tool in the same user turn. */
+	/** A failed threshold summary is not retried after every tool in the same user turn. */
 	private _failedThresholdSummaryKey: string | undefined;
 	private _continuationCancellationGeneration = 0;
 	private _pendingInLoopCompactionContinuation = false;
@@ -657,16 +673,12 @@ export class AgentSession {
 		}
 
 		const summaryKey = this._thresholdSummaryKey();
-		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) {
-			this._assertRequiredCompactionReady(context.messages);
-			return context;
-		}
+		if (summaryKey !== undefined && summaryKey === this._failedThresholdSummaryKey) return context;
 
 		const compactionGeneration = this._autoCompactionGeneration;
 		const cancellationGeneration = this._continuationCancellationGeneration;
 		const toolResultBoundary = context.messages.at(-1)?.role === "toolResult";
 		await this._runAutoCompaction("threshold", false);
-		if (this._autoCompactionGeneration === compactionGeneration) this._assertRequiredCompactionReady();
 		if (
 			toolResultBoundary &&
 			this._autoCompactionGeneration > compactionGeneration &&
@@ -685,7 +697,7 @@ export class AgentSession {
 	private _requiresCompaction(messages: AgentMessage[]): boolean {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings();
-		if (!model || !settings.enabled) return false;
+		if (!model || !settings.enabled || model.managesOwnContext) return false;
 		const boundary = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const boundaryTime = boundary ? new Date(boundary.timestamp).getTime() : -Infinity;
 		const llmMessages = convertToLlm(messages).map((message) =>
@@ -701,18 +713,6 @@ export class AgentSession {
 		const input = estimateRequestTokens(llmMessages).tokens;
 		const output = clampMaxTokensToContext(model, { messages: llmMessages }, model.maxTokens);
 		return shouldCompact(input, model.contextWindow, settings) || input + output >= model.contextWindow;
-	}
-
-	/** A failed/suppressed required compact is not permission to submit unchanged input. */
-	private _assertRequiredCompactionReady(messages = this.agent.state.messages): void {
-		if (!this._requiresCompaction(messages)) return;
-		const failure = this._autoCompactionFailure;
-		const cause = failure?.key === this._thresholdSummaryKey() ? failure?.error : undefined;
-		const detail = cause === undefined ? "" : `; cause: ${cause instanceof Error ? cause.message : String(cause)}`;
-		throw new BoundedCompactionError(
-			`required compaction did not make context safe; ordinary request not submitted${detail}`,
-			{ cause },
-		);
 	}
 
 	private _installAgentNextTurnRefresh(): void {
@@ -1504,15 +1504,8 @@ export class AgentSession {
 			// The user's new prompt is sent below, so do not call agent.continue() here.
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant) {
-				const failureGeneration = this._autoCompactionFailureGeneration;
 				await this._checkCompaction(lastAssistant, false, assertPromptAdmission);
 				assertSettings();
-				if (
-					this._autoCompactionFailureGeneration > failureGeneration ||
-					(this._failedThresholdSummaryKey !== undefined &&
-						this._failedThresholdSummaryKey === this._thresholdSummaryKey())
-				)
-					this._assertRequiredCompactionReady();
 			}
 
 			// Build messages array (custom message if any, then user message)
@@ -2438,7 +2431,10 @@ export class AgentSession {
 		}
 	}
 
-	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
+	/**
+	 * Generate Pi's built-in compaction summary for manual and automatic compaction.
+	 * Tries the session model first, then each `compaction.fallbackModels` entry in order.
+	 */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
 		requestModel: Model<any>,
@@ -2450,23 +2446,59 @@ export class AgentSession {
 		reason: "manual" | "threshold" | "overflow",
 	): Promise<CompactionResult> {
 		this._validateCompactedContext(preparation, "");
-		const result = await compact(
-			preparation,
-			requestModel,
-			apiKey,
-			headers,
-			customInstructions,
-			signal,
-			this.thinkingLevel,
-			this.agent.streamFunction,
-			env,
-			this.settingsManager.getRetrySettings(),
-			this._summarizationRetryCallbacks({ source: "compaction", reason }),
-			undefined, // sessionId
-		);
-		signal.throwIfAborted();
-		this._validateCompactedContext(preparation, result.summary);
-		return result;
+		const summarize = async (auth: {
+			model: Model<any>;
+			apiKey?: string;
+			headers?: Record<string, string>;
+			env?: Record<string, string>;
+		}): Promise<CompactionResult> => {
+			const result = await compact(
+				preparation,
+				auth.model,
+				auth.apiKey,
+				auth.headers,
+				customInstructions,
+				signal,
+				this.thinkingLevel,
+				this.agent.streamFunction,
+				auth.env,
+				this.settingsManager.getRetrySettings(),
+				this._summarizationRetryCallbacks({ source: "compaction", reason }),
+				undefined, // sessionId
+			);
+			signal.throwIfAborted();
+			this._validateCompactedContext(preparation, result.summary);
+			return result;
+		};
+		const failures: string[] = [];
+		let firstError: unknown;
+		const fail = (label: string, error: unknown) => {
+			signal.throwIfAborted();
+			firstError ??= error;
+			const message = compactionFailureReason(error);
+			failures.push(`${label}: ${message}`);
+		};
+		try {
+			return await summarize({ model: requestModel, apiKey, headers, env });
+		} catch (error) {
+			fail(`${requestModel.provider}/${requestModel.id}`, error);
+		}
+		for (const reference of this.settingsManager.getCompactionFallbackModels()) {
+			const slash = reference.indexOf("/");
+			const model =
+				slash > 0 ? this._modelRuntime.getModel(reference.slice(0, slash), reference.slice(slash + 1)) : undefined;
+			if (!model) {
+				fail(reference, new Error("model not found"));
+				continue;
+			}
+			try {
+				return await summarize(await this._getSummarizationRequestAuth(model));
+			} catch (error) {
+				fail(reference, error);
+			}
+		}
+		if (failures.length === 1) throw firstError;
+		throw new BoundedCompactionError(failures.join("; "), { cause: firstError });
 	}
 
 	private _clearManualCompactionState(): void {
@@ -2694,7 +2726,8 @@ export class AgentSession {
 	): Promise<boolean> {
 		assertPromptAdmission?.();
 		const settings = this.settingsManager.getCompactionSettings();
-		if (!settings.enabled) return false;
+		// Pi's history is not what this provider sees, so compacting it would not help.
+		if (!settings.enabled || this.model?.managesOwnContext) return false;
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
@@ -2822,7 +2855,6 @@ export class AgentSession {
 			return false;
 		}
 		const settings = this.settingsManager.getCompactionSettings();
-		this._autoCompactionFailure = undefined;
 		const release = this.beginRuntimeSettingsActivity();
 		let finishRun!: () => void;
 		this._autoCompactionRun = new Promise<void>((resolve) => {
@@ -2868,7 +2900,6 @@ export class AgentSession {
 				assertPromptAdmission?.();
 
 				if (extensionResult?.cancel) {
-					this._autoCompactionFailureGeneration++;
 					this._emit({
 						type: "compaction_end",
 						reason,
@@ -2896,6 +2927,7 @@ export class AgentSession {
 			let tokensBefore: number;
 			let usage: Usage | undefined;
 			let details: unknown;
+			let fallbackWarning: string | undefined;
 
 			if (extensionCompaction) {
 				// Extension provided compaction content
@@ -2906,26 +2938,59 @@ export class AgentSession {
 				details = extensionCompaction.details;
 			} else {
 				this._assertCompactionSnapshot(compactionSnapshot);
-				// Shared default summary generator, also used by manual compaction.
-				const compactResult = await this._runDefaultCompaction(
-					preparation,
-					requestModel,
-					apiKey,
-					headers,
-					undefined,
-					this._autoCompactionAbortController.signal,
-					env,
-					reason,
-				);
-				summary = compactResult.summary;
-				firstKeptEntryId = compactResult.firstKeptEntryId;
-				tokensBefore = compactResult.tokensBefore;
-				usage = compactResult.usage;
-				details = compactResult.details;
+				try {
+					// Shared default summary generator, also used by manual compaction.
+					const compactResult = await this._runDefaultCompaction(
+						preparation,
+						requestModel,
+						apiKey,
+						headers,
+						undefined,
+						this._autoCompactionAbortController.signal,
+						env,
+						reason,
+					);
+					summary = compactResult.summary;
+					firstKeptEntryId = compactResult.firstKeptEntryId;
+					tokensBefore = compactResult.tokensBefore;
+					usage = compactResult.usage;
+					details = compactResult.details;
+				} catch (error) {
+					// A failed summary must not leave the session unusable: drop the history
+					// before the normal cut point and say so, instead of blocking every request.
+					if (
+						this._autoCompactionAbortController.signal.aborted ||
+						(error instanceof Error && error.name === "AbortError") ||
+						this._compactionSnapshot() !== compactionSnapshot
+					)
+						throw error;
+					const cause = compactionFailureReason(error);
+					// Keep the normal recent tail; if it alone leaves no next-turn headroom,
+					// keep less (the cut point still never splits a tool call from its result).
+					let truncation = preparation;
+					for (let keep = settings.keepRecentTokens; ; keep = Math.floor(keep / 2)) {
+						const candidate =
+							keep === settings.keepRecentTokens
+								? preparation
+								: prepareCompaction(pathEntries, { ...settings, keepRecentTokens: keep });
+						if (candidate) truncation = candidate;
+						summary = truncationNote(truncation, cause);
+						try {
+							this._validateCompactedContext(truncation, summary);
+							break;
+						} catch {
+							if (keep <= 1) break;
+						}
+					}
+					firstKeptEntryId = truncation.firstKeptEntryId;
+					tokensBefore = truncation.tokensBefore;
+					usage = undefined;
+					details = computeFileLists(truncation.fileOps);
+					fallbackWarning = `Auto-compaction failed; earlier history was omitted: ${cause}`;
+				}
 			}
 
 			if (this._autoCompactionAbortController.signal.aborted) {
-				this._autoCompactionFailureGeneration++;
 				this._emit({
 					type: "compaction_end",
 					reason,
@@ -2975,7 +3040,14 @@ export class AgentSession {
 				usage,
 				details,
 			};
-			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+			this._emit({
+				type: "compaction_end",
+				reason,
+				result,
+				aborted: false,
+				willRetry,
+				...(fallbackWarning ? { errorMessage: fallbackWarning } : {}),
+			});
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;
@@ -2994,8 +3066,6 @@ export class AgentSession {
 			// Continue once so queued messages are delivered.
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
-			this._autoCompactionFailureGeneration++;
-			this._autoCompactionFailure = { key: this._thresholdSummaryKey(), error };
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
 				this._autoCompactionAbortController?.signal.aborted === true ||

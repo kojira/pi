@@ -856,6 +856,11 @@ export interface Model<TApi extends Api> {
 	cost: ModelCost;
 	contextWindow: number;
 	maxTokens: number;
+	/**
+	 * The provider keeps its own conversation history and receives only new turns,
+	 * so Pi never compacts automatically for this model.
+	 */
+	managesOwnContext?: boolean;
 	/** Default sampling parameters for this model. See {@link StreamOptions.samplingParams}; per-request keys override these. */
 	samplingParams?: Record<string, unknown>;
 	headers?: Record<string, string>;

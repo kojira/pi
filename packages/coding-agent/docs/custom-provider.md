@@ -733,6 +733,9 @@ interface ProviderModelConfig {
   /** Maximum output tokens. */
   maxTokens: number;
 
+  /** The provider keeps its own history and receives only new turns; Pi never auto-compacts this model. */
+  managesOwnContext?: boolean;
+
   /** Custom headers for this specific model. */
   headers?: Record<string, string>;
 
