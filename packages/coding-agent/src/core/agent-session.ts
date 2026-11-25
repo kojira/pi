@@ -697,7 +697,7 @@ export class AgentSession {
 	private _requiresCompaction(messages: AgentMessage[]): boolean {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings();
-		if (!model || !settings.enabled) return false;
+		if (!model || !settings.enabled || model.managesOwnContext) return false;
 		const boundary = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const boundaryTime = boundary ? new Date(boundary.timestamp).getTime() : -Infinity;
 		const llmMessages = convertToLlm(messages).map((message) =>
@@ -2726,7 +2726,8 @@ export class AgentSession {
 	): Promise<boolean> {
 		assertPromptAdmission?.();
 		const settings = this.settingsManager.getCompactionSettings();
-		if (!settings.enabled) return false;
+		// Pi's history is not what this provider sees, so compacting it would not help.
+		if (!settings.enabled || this.model?.managesOwnContext) return false;
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;

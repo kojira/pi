@@ -63,6 +63,7 @@ export interface ProviderConfigInput {
 		cost: Model<Api>["cost"];
 		contextWindow: number;
 		maxTokens: number;
+		managesOwnContext?: boolean;
 		samplingParams?: Record<string, unknown>;
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];

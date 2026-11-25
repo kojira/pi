@@ -243,6 +243,39 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		);
 	});
 
+	it("never compacts for a model that manages its own context (agy)", async () => {
+		const { h } = await setup();
+		h.session.modelRuntime.registerProvider("own-context", {
+			baseUrl: "acp://own-context",
+			apiKey: "local-only",
+			api: h.getModel().api,
+			models: [
+				{
+					id: "agent",
+					name: "agent",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 200000,
+					maxTokens: 32000,
+					managesOwnContext: true,
+				},
+			],
+		});
+		const agent = h.session.modelRuntime.getModel("own-context", "agent")!;
+		expect(agent.managesOwnContext).toBe(true);
+		h.session.agent.state.model = agent;
+		const last = h.session.agent.state.messages.at(-1)!;
+		if (last.role !== "assistant") throw new Error("fixture assistant missing");
+		Object.assign(last, { provider: "own-context", model: "agent" });
+		last.usage = { ...last.usage, input: 199000, totalTokens: 199000 };
+		h.setResponses([(context) => workResponse("agent reply", context)]);
+		await h.session.prompt("over the threshold");
+		expect(h.session.getLastAssistantText()).toBe("agent reply");
+		expect(h.faux.state.callCount).toBe(1);
+		expect(h.eventsOfType("compaction_start")).toHaveLength(0);
+	});
+
 	it("tries compaction.fallbackModels in order after the session model fails to summarize", async () => {
 		const h = await createHarness({
 			persistent: true,
