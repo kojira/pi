@@ -37,8 +37,10 @@ const ASCII_CHARS_PER_TOKEN = 2.5;
 const CJK_TOKENS_PER_CHAR = 1.5;
 
 export class BoundedCompactionError extends Error {
+	readonly reason: string;
 	constructor(reason: string, options?: ErrorOptions) {
 		super(`History preserved; compaction incomplete: ${reason}`, options);
+		this.reason = reason;
 	}
 }
 

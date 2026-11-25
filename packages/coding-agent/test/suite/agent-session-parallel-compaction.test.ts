@@ -63,11 +63,11 @@ describe("AgentSession parallel bounded compaction", () => {
 		return h;
 	}
 
-	function controlled(h: Harness): Pending[] {
+	function controlled(h: Harness, count = 10): Pending[] {
 		const pending: Pending[] = [];
 		h.setResponses(
 			Array.from(
-				{ length: 10 },
+				{ length: count },
 				() => (context: Context, options: SimpleStreamOptions | undefined) =>
 					new Promise<AssistantMessage>((resolve, reject) => {
 						pending.push({
@@ -365,23 +365,33 @@ describe("AgentSession parallel bounded compaction", () => {
 		},
 	);
 
-	it("preserves the first native deadline cause through the unsafe prompt and suppression gates", async () => {
+	it("continues the prompt after a native deadline failure with a truncation entry naming the cause", async () => {
 		const h = await setup();
 		const last = h.session.agent.state.messages.at(-1)!;
 		if (last.role !== "assistant") throw new Error("missing assistant");
 		last.usage = { ...last.usage, input: 190000, totalTokens: 190000 };
 		vi.useFakeTimers();
-		const pending = controlled(h);
-		const before = readFileSync(h.session.sessionFile!, "utf8");
-		const completion = h.session.prompt("unsubmitted intent").catch((error: unknown) => error);
+		const pending = controlled(h, 4);
+		const ordinary: Context[] = [];
+		h.appendResponses([
+			(context) => {
+				ordinary.push(context);
+				return workResponse("reply after deadline", context);
+			},
+		]);
+		const completion = h.session.prompt("intent after deadline");
 		await vi.advanceTimersByTimeAsync(480000);
-		expect(await completion).toMatchObject({
-			message: expect.stringContaining("8-minute deadline exceeded"),
-			cause: expect.objectContaining({ message: expect.stringContaining("8-minute deadline exceeded") }),
-		});
-		await expect(h.session.prompt("still unsubmitted")).rejects.toThrow(/8-minute deadline exceeded/);
+		await completion;
 		expect(pending).toHaveLength(4);
-		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
-		unchanged(h, before);
+		// The ordinary prompt was submitted on the truncated context.
+		expect(JSON.stringify(ordinary[0]?.messages)).toContain("earlier history omitted");
+		expect(JSON.stringify(ordinary[0]?.messages)).toContain("intent after deadline");
+		expect(h.session.getLastAssistantText()).toBe("reply after deadline");
+		const entries = h.sessionManager.getEntries().filter((e) => e.type === "compaction");
+		expect(entries).toHaveLength(1);
+		// The split turn's user request is kept, capped at 4000 characters.
+		expect(entries[0].summary).toBe(
+			`[earlier history omitted: compaction failed: 8-minute deadline exceeded]\n[current request: ${`3: ${"a".repeat(360000)}`.slice(0, 4000)}]`,
+		);
 	});
 });

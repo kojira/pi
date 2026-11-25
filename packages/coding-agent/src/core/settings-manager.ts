@@ -14,6 +14,7 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	fallbackModels?: string[]; // "provider/modelId" summarizers tried in order after the session model fails
 }
 
 export interface BranchSummarySettings {
@@ -846,6 +847,10 @@ export class SettingsManager {
 
 	getCompactionKeepRecentTokens(): number {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
+	}
+
+	getCompactionFallbackModels(): string[] {
+		return this.settings.compaction?.fallbackModels ?? [];
 	}
 
 	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {

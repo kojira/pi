@@ -222,32 +222,66 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		await h.session.compact();
 	});
 
-	it("fails closed in real prompt after required summary failure, including suppression", async () => {
+	it("continues the prompt with a truncation entry when the required summary fails", async () => {
 		const { h } = await setup();
 		const last = h.session.agent.state.messages.at(-1)!;
 		if (last.role !== "assistant") throw new Error("fixture assistant missing");
 		last.usage = { ...last.usage, input: 190000, totalTokens: 190000 };
-		const prefix = readFileSync(h.session.sessionFile!, "utf8");
-		const leaf = h.sessionManager.getLeafId();
-		let ordinary = 0;
-		h.setResponses([
-			fauxAssistantMessage(""),
-			() => {
-				ordinary++;
-				return fauxAssistantMessage("must not submit");
+		h.setResponses([fauxAssistantMessage(""), (context) => workResponse("reply after truncation", context)]);
+		await h.session.prompt("user intent after failed compaction");
+		expect(h.session.getLastAssistantText()).toBe("reply after truncation");
+		const entries = h.sessionManager.getEntries().filter((e) => e.type === "compaction");
+		expect(entries).toHaveLength(1);
+		expect(entries[0].summary).toBe(
+			"[earlier history omitted: compaction failed: empty summary output]\n[current request: old history]",
+		);
+		// The note is persisted in the session file and is what the model sees at the cut.
+		expect(readFileSync(h.session.sessionFile!, "utf8")).toContain("earlier history omitted");
+		expect(JSON.stringify(h.session.agent.state.messages[0])).toContain("earlier history omitted");
+		expect(h.eventsOfType("compaction_end")[0].errorMessage).toBe(
+			"Auto-compaction failed; earlier history was omitted: empty summary output",
+		);
+	});
+
+	it("tries compaction.fallbackModels in order after the session model fails to summarize", async () => {
+		const h = await createHarness({
+			persistent: true,
+			models: [
+				{ id: "primary", contextWindow: 200000, maxTokens: 32000 },
+				{ id: "broken-fallback", contextWindow: 200000, maxTokens: 32000 },
+				{ id: "working-fallback", contextWindow: 200000, maxTokens: 32000 },
+			],
+			settings: {
+				compaction: {
+					enabled: true,
+					keepRecentTokens: 1,
+					fallbackModels: ["faux/missing", "faux/broken-fallback", "faux/working-fallback"],
+				},
+				retry: { enabled: false },
 			},
-		]);
-		await expect(h.session.prompt("unsubmitted user intent")).rejects.toThrow(/compaction|History preserved/i);
-		await expect(h.session.prompt("unsubmitted user intent")).rejects.toThrow(/compaction|History preserved/i);
-		expect(ordinary).toBe(0);
-		expect(h.faux.state.callCount).toBe(1);
-		unchanged(h, prefix, leaf);
-		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
-		// A historical failure is not a blanket latch on a safe, smaller context.
-		last.usage = { ...last.usage, input: 100, totalTokens: 100 };
-		h.setResponses([(context) => workResponse("safe reply", context)]);
-		await h.session.prompt("small legitimate context");
-		expect(h.session.getLastAssistantText()).toBe("safe reply");
+		});
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "user", content: "old history", timestamp: Date.now() - 1000 });
+		h.sessionManager.appendMessage({ ...fauxAssistantMessage("kept response"), model: "primary" });
+		h.session.agent.state.messages = h.sessionManager.buildSessionContext().messages;
+		const summarizers: string[] = [];
+		h.setResponses(
+			["primary", "broken-fallback", "working-fallback"].map(
+				() =>
+					(
+						_context: Context,
+						_options: SimpleStreamOptions | undefined,
+						_state: unknown,
+						model: { id: string },
+					) => {
+						summarizers.push(model.id);
+						return fauxAssistantMessage(model.id === "working-fallback" ? checkpoint : "");
+					},
+			),
+		);
+		const result = await h.session.compact();
+		expect(summarizers).toEqual(["primary", "broken-fallback", "working-fallback"]);
+		expect(result.summary.startsWith(checkpoint)).toBe(true);
 	});
 
 	it("continues a small tool turn when the catalog output maximum equals the context window", async () => {
@@ -276,9 +310,10 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
 	});
 
-	it("fails closed at the real next assistant continuation after required summary failure", async () => {
+	it("continues the next assistant response with a truncation entry when the required summary fails", async () => {
 		const { h } = await setup("a".repeat(600000));
 		h.session.agent.state.tools = [
+			...h.session.agent.state.tools,
 			{
 				name: "grow",
 				label: "Grow",
@@ -287,25 +322,26 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 				execute: async () => ({ content: [{ type: "text", text: "r".repeat(160000) }], details: {} }),
 			},
 		];
-		let ordinary = 0;
+		const ordinary: Context[] = [];
 		h.setResponses([
-			fauxAssistantMessage(fauxToolCall("grow", {}), {
-				stopReason: "toolUse",
+			fauxAssistantMessage(fauxToolCall("grow", {}), { stopReason: "toolUse" }),
+			...Array.from({ length: 8 }, () => (context: Context) => {
+				if (context.systemPrompt?.includes("context summarization assistant")) return fauxAssistantMessage("");
+				ordinary.push(context);
+				return workResponse("continued after truncation", context);
 			}),
-			fauxAssistantMessage(""),
-			(context) => {
-				// The second leaf may already be in flight when the first fails.
-				if (context.systemPrompt?.includes("context summarization assistant"))
-					return fauxAssistantMessage(checkpoint);
-				ordinary++;
-				return workResponse("must not continue", context);
-			},
 		]);
-		await h.session.prompt("grow context").catch(() => {});
-		expect(h.faux.state.callCount).toBe(3);
-		expect(ordinary).toBe(0);
-		expect(h.eventsOfType("compaction_end")).toHaveLength(1);
-		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(0);
+		await h.session.prompt("grow context");
+		expect(h.session.getLastAssistantText()).toBe("continued after truncation");
+		// The continuation after the tool result was submitted on the truncated context.
+		expect(JSON.stringify(ordinary[0].messages)).toContain("earlier history omitted");
+		expect(JSON.stringify(ordinary[0].messages)).not.toContain("a".repeat(1000));
+		const entries = h.sessionManager.getEntries().filter((e) => e.type === "compaction");
+		expect(entries).toHaveLength(1);
+		// The cut split the current turn; its user request stays visible in the note.
+		expect(entries[0].summary).toBe(
+			"[earlier history omitted: compaction failed: empty summary output]\n[current request: grow context]",
+		);
 	});
 
 	it.each([
@@ -919,7 +955,7 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 		},
 	);
 
-	it("suppresses deterministic threshold failures until new conditions or explicit successful compact", async () => {
+	it("does not retry a failed threshold summary after it was replaced by truncation", async () => {
 		const { h } = await setup();
 		const internals = h.session as unknown as { _checkCompaction(message: AssistantMessage): Promise<boolean> };
 		const trigger = {
@@ -929,13 +965,12 @@ describe("D-COMP-002 AgentSession bounded native compaction", () => {
 			model: h.getModel().id,
 			usage: { ...fauxAssistantMessage("").usage, input: 190000, totalTokens: 190000 },
 		};
+		// A failed summary is replaced by a truncation entry, so the same failure is not retried.
 		h.setResponses([fauxAssistantMessage(""), fauxAssistantMessage(checkpoint)]);
 		await internals._checkCompaction(trigger);
 		await internals._checkCompaction(trigger);
 		expect(h.faux.state.callCount).toBe(1);
-		expect(h.eventsOfType("compaction_end")[0].errorMessage).toContain("History preserved; compaction incomplete");
-		await h.session.compact();
-		expect(h.faux.state.callCount).toBe(2);
+		expect(h.eventsOfType("compaction_end")[0].errorMessage).toContain("earlier history was omitted");
 		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(1);
 	});
 

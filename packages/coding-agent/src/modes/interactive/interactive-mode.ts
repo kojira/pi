@@ -3428,6 +3428,7 @@ export class InteractiveMode {
 							new Date().toISOString(),
 						),
 					);
+					if (event.errorMessage) this.showWarning(event.errorMessage);
 					if (event.result.usage) {
 						this.addCompactionCostNotice({
 							type: "compaction_cost",
